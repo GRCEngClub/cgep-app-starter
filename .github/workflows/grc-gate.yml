@@ -1,0 +1,110 @@
+name: grc-gate
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+env:
+  AWS_REGION: us-east-1
+  TF_WORKING_DIR: terraform/primitives/evidence-vault
+
+jobs:
+  grc-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+          terraform_wrapper: false
+
+      - name: Install Conftest
+        run: |
+          curl -fsSL https://github.com/open-policy-agent/conftest/releases/download/v0.50.0/conftest_0.50.0_Linux_x86_64.tar.gz \
+            | tar -xz -C /usr/local/bin conftest
+
+      - name: Install tfsec
+        run: |
+          curl -fsSL https://github.com/aquasecurity/tfsec/releases/download/v1.28.14/tfsec-linux-amd64 \
+            -o /usr/local/bin/tfsec && chmod +x /usr/local/bin/tfsec
+
+      - name: Terraform plan
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform init -input=false
+          terraform validate
+          terraform plan -out=tfplan -no-color | tee plan.txt
+          terraform show -json tfplan > plan.json
+
+      - name: Conftest policy gate
+        id: conftest
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          mkdir -p ../../evidence
+          {
+            echo "["
+            FIRST=1
+            for ns in compliance.sc28_aws compliance.ac3_aws compliance.cm6_aws compliance.cm6; do
+              [[ $FIRST -eq 1 ]] && FIRST=0 || printf ","
+              conftest test --policy ../../policies --namespace "$ns" --output=json plan.json || true
+            done
+            echo "]"
+          } > ../../evidence/conftest-results.json
+          python3 -c '
+          import json, sys
+          import os
+          f = "../../evidence/conftest-results.json"
+          if not os.path.exists(f) or os.path.getsize(f) == 0:
+          sys.exit(0)
+          d = json.load(open(f))
+          fails = sum(len(r.get("failures") or []) for results in d for r in (results if isinstance(results, list) else [results]))
+          print(f"conftest failures: {fails}")
+          sys.exit(0 if fails == 0 else 1)
+          '
+
+      - name: tfsec scan
+        id: tfsec
+        if: always()
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          tfsec . --format sarif --out ../../evidence/tfsec.sarif || true
+          python3 -c '
+          import json, sys
+          d = json.load(open("../../evidence/tfsec.sarif"))
+          high = sum(
+              1 for run in d.get("runs", [])
+              for r in run.get("results", [])
+              if (r.get("level") or "").lower() in ("error","critical","high")
+          )
+          print(f"tfsec high+critical: {high}")
+          sys.exit(0 if high == 0 else 1)
+          '
+
+      - name: Copy plan into evidence
+        if: always()
+        run: |
+          mkdir -p evidence
+          cp ${{ env.TF_WORKING_DIR }}/plan.json evidence/plan.json
+          cp ${{ env.TF_WORKING_DIR }}/plan.txt evidence/plan.txt
+
+      - name: Upload evidence artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grc-evidence-${{ github.run_id }}
+          path: evidence/
+          retention-days: 90
