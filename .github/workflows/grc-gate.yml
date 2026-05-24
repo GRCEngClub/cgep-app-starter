@@ -9,9 +9,65 @@ on:
 jobs:
   setup:
     runs-on: ubuntu-latest
+
+    env:
+      EVIDENCE_BUCKET: acme-grc-evidence-${{ secrets.AWS_ACCOUNT_ID }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Verify pipeline wiring
         run: echo "Pipeline is alive."
+
+      - name: Terraform Init
+        run: terraform -chdir=terraform init
+
+      - name: Terraform Plan
+        run: terraform -chdir=terraform plan -out=plan.out
+
+      - name: Convert plan to JSON
+        run: terraform -chdir=terraform show -json plan.out > plan.json
+
+      # -------------------------
+      # LAYER 2: POLICY ENFORCEMENT
+      # -------------------------
+      - name: Run Conftest
+        run: |
+          conftest test --output json terraform/plan.json > conftest-results.json
+
+      # -------------------------
+      # LAYER 3: TRUST + SIGNING
+      # -------------------------
+      - name: Install Cosign
+        run: |
+          curl -sSL https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64 \
+            -o /usr/local/bin/cosign
+          chmod +x /usr/local/bin/cosign
+
+      - name: Sign Terraform Plan
+        run: |
+          cosign sign-blob --yes terraform/plan.json > plan.sig
+
+      - name: Sign Conftest Results
+        run: |
+          cosign sign-blob --yes conftest-results.json > conftest.sig
+
+      # -------------------------
+      # LAYER 3: EVIDENCE UPLOAD
+      # -------------------------
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Upload Signed Evidence to Evidence Vault
+        run: |
+          ts=$(date +%s)
+
+          aws s3 cp terraform/plan.json         s3://$EVIDENCE_BUCKET/$ts-plan.json
+          aws s3 cp plan.sig                    s3://$EVIDENCE_BUCKET/$ts-plan.sig
+          aws s3 cp conftest-results.json       s3://$EVIDENCE_BUCKET/$ts-conftest.json
+          aws s3 cp conftest.sig                s3://$EVIDENCE_BUCKET/$ts-conftest.sig
