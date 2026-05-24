@@ -1,0 +1,23 @@
+component-definition:
+  uuid: 11111111-2222-3333-4444-555555555555
+  metadata:
+    title: ACME GRC Baseline
+    last-modified: 2026-05-23T00:00:00Z
+    version: 1.0.0
+  components:
+    - uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+      type: software
+      title: Terraform Baseline Controls
+      description: >
+        Implements encryption, logging, versioning, and least privilege controls
+        for the ACME intake workload. Mapped to NIST 800-53 controls.
+      control-implementations:
+        - source: https://csrc.nist.gov/ns/oscal/1.0
+          description: Layer 1 + Layer 2 enforcement
+          implemented-requirements:
+            - control-id: sc-13
+              description: S3 and DynamoDB encrypted with CMK
+            - control-id: au-2
+              description: CloudTrail multi-region logging
+            - control-id: ac-6
+              description: IAM least privilege enforced via Rego
