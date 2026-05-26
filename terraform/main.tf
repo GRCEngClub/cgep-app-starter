@@ -247,3 +247,78 @@ resource "aws_lambda_permission" "apigw" {
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.intake.execution_arn}/*/*"
 }
+# Lab 2.4 — Reusable compliant S3 module
+# Replaces the hardcoded KMS + S3 blocks with a reusable module
+module "compliant_uploads" {
+  source = "../modules/compliant-s3"
+
+  bucket_name = "${local.name_prefix}-uploads-v2"
+  environment = "dev"
+
+  tags = {
+    Control   = "CC6.1"
+    Gap       = "GAP-01"
+    ManagedBy = "terraform"
+  }
+}
+# GAP-01 fix: Customer-managed KMS key for S3
+resource "aws_kms_key" "uploads" {
+  description             = "CMK for Acme Health S3 uploads bucket"
+  deletion_window_in_days = 7
+  enable_key_rotation     = true
+
+  tags = {
+    Control = "CC6.1"
+    Gap     = "GAP-01"
+  }
+}
+
+resource "aws_kms_alias" "uploads" {
+  name          = "alias/acme-health-uploads"
+  target_key_id = aws_kms_key.uploads.key_id
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "uploads" {
+  bucket = aws_s3_bucket.uploads.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.uploads.arn
+    }
+    bucket_key_enabled = true
+  }
+}
+
+resource "aws_s3_bucket_policy" "uploads_tls" {
+  bucket = aws_s3_bucket.uploads.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "DenyNonTLS"
+        Effect    = "Deny"
+        Principal = "*"
+        Action    = "s3:*"
+        Resource  = [
+          aws_s3_bucket.uploads.arn,
+          "${aws_s3_bucket.uploads.arn}/*"
+        ]
+        Condition = {
+          Bool = {
+            "aws:SecureTransport" = "false"
+          }
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_s3_bucket_versioning" "uploads" {
+  bucket = aws_s3_bucket.uploads.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}

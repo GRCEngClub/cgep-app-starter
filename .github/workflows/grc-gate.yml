@@ -1,0 +1,104 @@
+# GRC Gate — SOC 2 Compliance Pipeline
+# Runs on every PR and push to main
+# Steps: Plan → Policy Check → Apply → Sign → Upload
+
+name: GRC Compliance Gate
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write  # Required for Cosign keyless signing via GitHub OIDC
+
+jobs:
+  grc-gate:
+    name: GRC Compliance Gate
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 0 — Checkout the repo
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Step 1 — Set up Terraform
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.2"
+
+      # Step 2 — Set up OPA and Conftest
+      - name: Setup Conftest
+        run: |
+          wget https://github.com/open-policy-agent/conftest/releases/download/v0.50.0/conftest_0.50.0_Linux_x86_64.tar.gz
+          tar xzf conftest_0.50.0_Linux_x86_64.tar.gz
+          sudo mv conftest /usr/local/bin/
+
+      # Step 3 — Configure AWS credentials
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      # Step 4 — Terraform Init
+      - name: Terraform Init
+        working-directory: terraform
+        run: terraform init
+
+      # Step 5 — Terraform Plan
+      - name: Terraform Plan
+        working-directory: terraform
+        run: |
+          terraform plan -out=/tmp/tfplan.binary
+          terraform show -json /tmp/tfplan.binary > /tmp/tfplan.json
+
+      # Step 6 — Policy Check with Conftest
+      - name: Policy Check
+        run: |
+          conftest test /tmp/tfplan.json \
+            --policy policies \
+            --namespace policies.s3_kms_encryption \
+            --namespace policies.s3_tls_enforcement \
+            --namespace policies.s3_versioning \
+            --namespace policies.lambda_vpc \
+            --namespace policies.iam_no_wildcard
+
+      # Step 7 — Terraform Apply (only on push to main, not on PRs)
+      - name: Terraform Apply
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        working-directory: terraform
+        run: terraform apply -auto-approve
+
+      # Step 8 — Install Cosign
+      - name: Install Cosign
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: sigstore/cosign-installer@v3
+
+      # Step 9 — Bundle and sign evidence
+      - name: Sign Evidence Bundle
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          BUNDLE_NAME="evidence-$(date +%Y%m%d-%H%M%S).tar.gz"
+          tar czf "/tmp/$BUNDLE_NAME" /tmp/tfplan.json
+          SHA256=$(sha256sum "/tmp/$BUNDLE_NAME" | cut -d' ' -f1)
+          echo "Bundle: $BUNDLE_NAME"
+          echo "SHA256: $SHA256"
+          cosign sign-blob "/tmp/$BUNDLE_NAME" \
+            --bundle "/tmp/$BUNDLE_NAME.bundle" \
+            --yes
+          echo "BUNDLE_NAME=$BUNDLE_NAME" >> $GITHUB_ENV
+          echo "SHA256=$SHA256" >> $GITHUB_ENV
+
+      # Step 10 — Upload signed bundle to evidence vault
+      - name: Upload Evidence to Vault
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          aws s3 cp "/tmp/$BUNDLE_NAME" \
+            "s3://acme-health-intake-evidence-5d2aa24b/$BUNDLE_NAME" \
+            --metadata "sha256=$SHA256,pipeline-run=${{ github.run_id }}"
+          echo "✅ Evidence uploaded to vault"
