@@ -1,17 +1,4 @@
-# Terraform
+*.exe
 .terraform/
-.terraform.lock.hcl
-*.tfstate
-*.tfstate.*
-*.tfvars
-!terraform.tfvars.example
-tfplan
-*.tfplan
-crash.log
-
-# Lambda build
-terraform/lambda/handler.zip
-
-# Local
-evidence/
-.DS_Store
+*.tfstate*
+tfplan*
