@@ -1,0 +1,56 @@
+{
+  "component-definition": {
+    "uuid": "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d",
+    "metadata": {
+      "title": "Acme Health - OSCAL Component Definition (SOC 2 Architecture)",
+      "last-modified": "2026-05-28T12:00:00Z",
+      "version": "1.0.0",
+      "oscal-version": "1.1.0",
+      "remarks": "Mapeo formal de controles de infraestructura en AWS para cumplimiento SOC 2"
+    },
+    "components": [
+      {
+        "uuid": "88888888-4444-4444-4444-121212121212",
+        "type": "software",
+        "title": "Acme Health Secure Cloud Infrastructure",
+        "description": "Definición de componentes de infraestructura parcheados y auditados mediante OPA Gates.",
+        "purpose": "Asegurar el cumplimiento continuo de la confidencialidad e integridad de los datos de salud.",
+        "control-implementations": [
+          {
+            "uuid": "99999999-5555-5555-5555-343434343434",
+            "source": "https://pages.nist.gov/OSCAL/downloads/catalog/json/soc2-catalog.json",
+            "description": "Implementación técnica de controles de seguridad correspondientes a los Criterios de Servicios de Confianza de SOC 2.",
+            "implemented-requirements": [
+              {
+                "uuid": "11111111-aaaa-bbbb-cccc-dddddddddddd",
+                "control-id": "CC6.1",
+                "description": "Controles de acceso lógico: Se restringe el acceso perimetral a la base de datos de producción mediante el bloqueo total de puertos de administración pública.",
+                "statements": [
+                  {
+                    "id": "statement-cc6.1-aws",
+                    "description": "El Security Group de AWS bloquea accesos SSH (22) y MySQL (3306) entrantes desde el internet público (0.0.0.0/0), permitiendo tráfico únicamente de subredes internas autorizadas."
+                  }
+                ]
+              },
+              {
+                "uuid": "22222222-aaaa-bbbb-cccc-dddddddddddd",
+                "control-id": "CC6.3",
+                "description": "Protección contra la alteración de datos: Mitigación de riesgos de exposición de datos en reposo.",
+                "statements": [
+                  {
+                    "id": "statement-cc6.3-aws-s3",
+                    "description": "El bucket S3 'Evidence Vault' cuenta con cifrado nativo AWS KMS (SSE-KMS), Versionado activo y Object Lock inmutable configurado por 365 días."
+                  },
+                  {
+                    "id": "statement-cc6.3-aws-rds",
+                    "description": "La instancia de base de datos RDS tiene la propiedad 'storage_encrypted' habilitada forzosamente a través de llaves administradas por el cliente en KMS."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

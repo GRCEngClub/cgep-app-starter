@@ -113,6 +113,10 @@ resource "aws_dynamodb_table" "intake" {
 
   # No server_side_encryption block. Defaults to AWS-owned key.
   # GAP-02: capstone learner expected to add this with a customer-owned key.
+  server_side_encryption {
+    enabled     = true
+    kms_key_arn = aws_kms_key.cmk.arn
+  }
 }
 
 ######################################################################
@@ -130,6 +134,52 @@ resource "aws_dynamodb_table" "intake" {
 
 resource "aws_s3_bucket" "uploads" {
   bucket = "${local.name_prefix}-uploads-${local.suffix}"
+}
+
+# --- MITIGATION GAP-01: Cifrado con nuestra propia llave KMS ---
+resource "aws_s3_bucket_server_side_encryption_configuration" "uploads_encryption" {
+  bucket = aws_s3_bucket.uploads.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      kms_master_key_id = aws_kms_key.cmk.arn
+      sse_algorithm     = "aws:kms"
+    }
+  }
+}
+
+# --- MITIGACIÓN GAP-04: Versionado para asegurar disponibilidad de datos médicos ---
+resource "aws_s3_bucket_versioning" "uploads_versioning" {
+  bucket = aws_s3_bucket.uploads.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+# --- MITIGACIÓN GAP-03: Política para denegar accesos que no usen HTTPS/TLS ---
+resource "aws_s3_bucket_policy" "uploads_tls_policy" {
+  bucket = aws_s3_bucket.uploads.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "EnforceTLSRequestsOnly"
+        Effect    = "Deny"
+        Principal = "*"
+        Action    = "s3:*"
+        Resource = [
+          aws_s3_bucket.uploads.arn,
+          "${aws_s3_bucket.uploads.arn}/*"
+        ]
+        Condition = {
+          Bool = {
+            "aws:SecureTransport" = "false" # Si no es HTTPS, se bloquea por completo
+          }
+        }
+      }
+    ]
+  })
 }
 
 # (Intentionally omitted: SSE-KMS encryption with a customer CMK,
@@ -167,7 +217,7 @@ resource "aws_iam_role_policy_attachment" "lambda_basic" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-# GAP-07: deliberately broad permissions on the workload data stores.
+# --- MITIGACIÓN GAP-07: Reducción al Principio de Menor Privilegio ---
 resource "aws_iam_role_policy" "lambda_inline" {
   name = "intake-data-access"
   role = aws_iam_role.lambda.id
@@ -176,14 +226,30 @@ resource "aws_iam_role_policy" "lambda_inline" {
     Version = "2012-10-17"
     Statement = [
       {
-        Effect   = "Allow"
-        Action   = "dynamodb:*"
+        Sid    = "DynamoDBGranularWrite"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:PutItem" # Solo permite insertar datos, no borrar ni leer la tabla completa
+        ]
         Resource = aws_dynamodb_table.intake.arn
       },
       {
-        Effect   = "Allow"
-        Action   = "s3:*"
-        Resource = ["${aws_s3_bucket.uploads.arn}", "${aws_s3_bucket.uploads.arn}/*"]
+        Sid    = "S3GranularPut"
+        Effect = "Allow"
+        Action = [
+          "s3:PutObject",          # Permitir subir los archivos médicos
+          "s3:PutObjectAcl"        # Requerido a veces para asignación de control de acceso
+        ]
+        Resource = "${aws_s3_bucket.uploads.arn}/*"
+      },
+      {
+        Sid    = "KMSKeyUsage"
+        Effect = "Allow"
+        Action = [
+          "kms:Decrypt",
+          "kms:GenerateDataKey" # Requerido para que la Lambda pueda escribir en recursos cifrados con nuestra CMK
+        ]
+        Resource = aws_kms_key.cmk.arn
       }
     ]
   })
@@ -246,4 +312,42 @@ resource "aws_lambda_permission" "apigw" {
   function_name = aws_lambda_function.intake.function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.intake.execution_arn}/*/*"
+}
+
+resource "aws_kms_key" "cmk" {
+  description             = "KMS CMK for Acme Health Patient Intake API (SOC 2 CC6.1 Compliance)"
+  deletion_window_in_days = 7
+  enable_key_rotation     = true # Requerimiento estricto de auditoría
+
+  tags = {
+    Environment = "sandbox"
+    ManagedBy   = "Terraform"
+    Compliance  = "SOC2-CC6.1"
+  }
+}
+
+resource "aws_kms_alias" "cmk_alias" {
+  name          = "alias/acme-health-cmk"
+  target_key_id = aws_kms_key.cmk.key_id
+}
+
+# --- CAJA FUERTE DE EVIDENCIAS DE AUDITORÍA INMUTABLES ---
+
+resource "aws_s3_bucket" "evidence_vault" {
+  bucket        = "acme-health-evidence-vault-520999258289" # Tu número de cuenta para que sea único
+  force_destroy = true
+
+  # Activamos Object Lock a nivel de infraestructura
+  object_lock_enabled = true
+}
+
+resource "aws_s3_bucket_object_lock_configuration" "vault_lock" {
+  bucket = aws_s3_bucket.evidence_vault.id
+
+  rule {
+    default_retention {
+      mode = "GOVERNANCE"
+      days = 90 # Las evidencias quedan blindadas por 90 días
+    }
+  }
 }
