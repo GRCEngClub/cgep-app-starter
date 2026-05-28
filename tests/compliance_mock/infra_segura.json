@@ -1,0 +1,21 @@
+{
+  "resource_changes": [
+    {
+      "address": "aws_s3_bucket_server_side_encryption_configuration.seguro",
+      "type": "aws_s3_bucket_server_side_encryption_configuration",
+      "change": {
+        "after": {
+          "rule": [
+            {
+              "apply_server_side_encryption_by_default": [
+                {
+                  "sse_algorithm": "aws:kms"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "$schema": "https://raw.githubusercontent.com/usnistgov/oscal-content/main/schema/json/oscal_component_schema.json",
+  "component-definition": {
+    "uuid": "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d",
+    "metadata": {
+      "title": "Acme Health SecOps Component Definition",
+      "last-modified": "2026-05-28T19:00:00Z",
+      "version": "1.1.0",
+      "oscal-version": "1.1.0",
+      "remarks": "Formato estricto OSCAL con metadatos de procedencia para el portafolio CGE-P."
+    },
+    "components": [
+      {
+        "uuid": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+        "type": "software",
+        "title": "OPA DevSecOps Gate",
+        "description": "Motor automatizado de politicas Rego integrado en GitHub Actions.",
+        "purpose": "Asegurar las barreras tecnicas del entorno pre-deployment para SOC 2.",
+        "control-implementations": [
+          {
+            "uuid": "e4d3c2b1-a0b9-c8d7-e6f5-a4b3c2d1e0f9",
+            "source": "https://github.com/FabioNavarro-GRC/cgep-app-starter",
+            "description": "Validacion criptografica de cifrado en reposo y configuracion de bitacoras en AWS via analisis estatico de planes de Terraform.",
+            "implemented-requirements": [
+              {
+                "uuid": "7c9e1b3a-5d2f-4e6a-8b0c-1d3e5f7a9b1c",
+                "control-id": "CC6.1",
+                "remarks": "Control mitigado mediante politicas automatizadas que rechazan configuraciones S3 sin llaves CMK controladas por el cliente."
+              },
+              {
+                "uuid": "8d0f2c4b-6e3a-5f7b-9c1d-2e4f6a8b0c2d",
+                "control-id": "CC6.3",
+                "remarks": "Control mitigado validando que los recursos no expongan accesos publicos no deseados en la capa de datos."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
