@@ -1,0 +1,141 @@
+name: GRC Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  TF_DIR: terraform
+
+jobs:
+  grc-gate:
+    name: Plan → Policy → Apply → Sign → Upload
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 0. Checkout ────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── AWS credentials via OIDC ───────────────────────────────────
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ── Setup tools ────────────────────────────────────────────────
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.6"
+
+      - name: Install OPA
+        run: |
+          curl -sL -o /usr/local/bin/opa \
+            https://openpolicyagent.org/downloads/latest/opa_linux_amd64_static
+          chmod +x /usr/local/bin/opa
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      # ── Step 1: Plan ───────────────────────────────────────────────
+      - name: Terraform Init
+        run: terraform init -input=false
+        working-directory: ${{ env.TF_DIR }}
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform plan -input=false -out=tfplan.binary
+          terraform show -json tfplan.binary > tfplan.json
+        working-directory: ${{ env.TF_DIR }}
+
+      # ── Step 2: Policy check ───────────────────────────────────────
+      - name: OPA Policy Tests
+        run: opa test ./policies -v
+
+      - name: Conftest Policy Gate
+        run: |
+          opa eval \
+            --input terraform/tfplan.json \
+            --data policies \
+            --format pretty \
+            'data.compliance' | tee /tmp/policy-results.txt
+
+          # Count all deny messages across every policy package
+          VIOLATIONS=$(opa eval \
+            --input terraform/tfplan.json \
+            --data policies \
+            --format raw \
+            'count([msg | msg := data.compliance[_][_].deny[_]])' \
+            | tr -d '[:space:]')
+
+          echo "Total policy violations: $VIOLATIONS"
+
+          if [ "$VIOLATIONS" -gt 0 ]; then
+            echo "POLICY GATE FAILED — $VIOLATIONS violation(s) detected"
+            exit 1
+          fi
+          echo "POLICY GATE PASSED"
+
+      # ── Step 3: Apply (merge to main only) ────────────────────────
+      - name: Terraform Apply
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: terraform apply -input=false -auto-approve
+        working-directory: ${{ env.TF_DIR }}
+
+      # ── Step 4: Bundle and sign evidence ──────────────────────────
+      - name: Bundle evidence
+        id: bundle
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          BUNDLE="evidence-${{ github.run_id }}-${{ github.sha }}.tar.gz"
+          mkdir -p bundle
+          cp terraform/tfplan.json bundle/tfplan.json
+          cp /tmp/policy-results.txt bundle/policy-results.txt
+          echo "${{ github.sha }}" > bundle/git-sha.txt
+          echo "${{ github.run_id }}" > bundle/run-id.txt
+          tar -czf "$BUNDLE" -C bundle .
+          sha256sum "$BUNDLE" > "${BUNDLE}.sha256"
+          echo "name=$BUNDLE" >> $GITHUB_OUTPUT
+
+      - name: Sign bundle with Cosign (keyless)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          BUNDLE="${{ steps.bundle.outputs.name }}"
+          cosign sign-blob \
+            --yes \
+            --bundle="${BUNDLE}.sig.bundle" \
+            "$BUNDLE"
+
+      # ── Step 5: Upload to evidence vault ──────────────────────────
+      - name: Upload to evidence vault
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          BUNDLE="${{ steps.bundle.outputs.name }}"
+          RUN_PATH="s3://${{ secrets.EVIDENCE_VAULT }}/runs/${{ github.run_id }}"
+          aws s3 cp "$BUNDLE"            "${RUN_PATH}/$BUNDLE"
+          aws s3 cp "${BUNDLE}.sha256"   "${RUN_PATH}/${BUNDLE}.sha256"
+          aws s3 cp "${BUNDLE}.sig.bundle" "${RUN_PATH}/${BUNDLE}.sig.bundle"
+
+          cat > receipt.json <<EOF
+          {
+            "run_id": "${{ github.run_id }}",
+            "sha": "${{ github.sha }}",
+            "ref": "${{ github.ref }}",
+            "actor": "${{ github.actor }}",
+            "bundle": "$BUNDLE",
+            "vault": "${{ secrets.EVIDENCE_VAULT }}",
+            "uploaded_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+          aws s3 cp receipt.json "${RUN_PATH}/receipt.json"
+          echo "Evidence uploaded to ${RUN_PATH}"

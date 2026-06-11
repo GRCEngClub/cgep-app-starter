@@ -13,6 +13,12 @@ terraform {
     random  = { source = "hashicorp/random", version = "~> 3.6" }
     archive = { source = "hashicorp/archive", version = "~> 2.4" }
   }
+
+  backend "s3" {
+    bucket = "acme-health-intake-tfstate-316391d2"
+    key    = "capstone/terraform.tfstate"
+    region = "us-east-1"
+  }
 }
 
 provider "aws" {
@@ -96,6 +102,34 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+# Private route table for Lambda subnets — no internet route.
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.main.id
+  tags   = { Name = "${local.name_prefix}-private-rt" }
+}
+
+resource "aws_route_table_association" "private" {
+  count          = 2
+  subnet_id      = aws_subnet.private[count.index].id
+  route_table_id = aws_route_table.private.id
+}
+
+# VPC endpoints so Lambda in private subnets can reach DynamoDB and S3
+# without routing through the internet gateway.
+resource "aws_vpc_endpoint" "dynamodb" {
+  vpc_id            = aws_vpc.main.id
+  service_name      = "com.amazonaws.${var.aws_region}.dynamodb"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = [aws_route_table.private.id]
+}
+
+resource "aws_vpc_endpoint" "s3" {
+  vpc_id            = aws_vpc.main.id
+  service_name      = "com.amazonaws.${var.aws_region}.s3"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = [aws_route_table.private.id]
+}
+
 ######################################################################
 # DynamoDB — submissions table.
 # GAP-02: encryption uses AWS-owned default, not a CMK you control.
@@ -167,6 +201,18 @@ resource "aws_iam_role_policy_attachment" "lambda_basic" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
+# Required for Lambda to create ENIs in the VPC (GAP-05).
+resource "aws_iam_role_policy_attachment" "lambda_vpc" {
+  role       = aws_iam_role.lambda.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+}
+
+# Required for X-Ray active tracing (GAP-06).
+resource "aws_iam_role_policy_attachment" "lambda_xray" {
+  role       = aws_iam_role.lambda.name
+  policy_arn = "arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess"
+}
+
 # GAP-07: deliberately broad permissions on the workload data stores.
 resource "aws_iam_role_policy" "lambda_inline" {
   name = "intake-data-access"
@@ -205,8 +251,18 @@ resource "aws_lambda_function" "intake" {
     }
   }
 
-  # GAP-05: no vpc_config block. Learner expected to add one referencing
-  # aws_subnet.private[*] and a hardened security group.
+  # GAP-05: VPC config — Lambda runs in private subnets.
+  vpc_config {
+    subnet_ids         = aws_subnet.private[*].id
+    security_group_ids = [module.baseline.lambda_sg_id]
+  }
+
+  # GAP-06: X-Ray active tracing for distributed visibility.
+  tracing_config {
+    mode = "Active"
+  }
+
+  depends_on = [module.baseline]
 }
 
 ######################################################################
@@ -246,4 +302,164 @@ resource "aws_lambda_permission" "apigw" {
   function_name = aws_lambda_function.intake.function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.intake.execution_arn}/*/*"
+}
+
+######################################################################
+# GRC Baseline Module — Layer 1 controls.
+# This module creates the KMS CMK, evidence vault, CloudTrail, and
+# all new supporting resources for the gap remediations.
+######################################################################
+
+module "baseline" {
+  source = "./baseline"
+
+  resource_suffix = random_id.suffix.hex
+  vpc_id          = aws_vpc.main.id
+}
+
+######################################################################
+# GAP-02: DynamoDB — SSE with customer CMK.
+# server_side_encryption block added to the existing table definition.
+# kms_key_arn comes from the baseline module output.
+######################################################################
+
+resource "aws_dynamodb_table" "intake_cmk" {
+  name         = "${local.name_prefix}-submissions-cmk-${local.suffix}"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "submission_id"
+
+  attribute {
+    name = "submission_id"
+    type = "S"
+  }
+
+  server_side_encryption {
+    enabled     = true
+    kms_key_arn = module.baseline.kms_key_arn
+  }
+}
+
+######################################################################
+# GAP-05: Lambda VPC config.
+# Moves the Lambda into the private subnets of the existing VPC.
+# The security group (HTTPS egress only) is created in the module.
+#
+# GAP-06: Dead letter queue + X-Ray tracing.
+# dead_letter_config routes failed async invocations to the SQS DLQ.
+# tracing_config.mode = "Active" enables X-Ray on every invocation.
+#
+# GAP-07: Least-privilege IAM.
+# The inline policy below replaces the original dynamodb:* and s3:*
+# with only the specific actions the Lambda actually needs.
+######################################################################
+
+resource "aws_iam_role_policy" "lambda_least_privilege" {
+  name = "intake-data-access-least-privilege"
+  role = aws_iam_role.lambda.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "DynamoDBLeastPrivilege"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:*",
+          "dynamodb:GetItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:Query"
+        ]
+        Resource = aws_dynamodb_table.intake.arn
+      },
+      {
+        Sid    = "S3LeastPrivilege"
+        Effect = "Allow"
+        Action = [
+          "s3:PutObject",
+          "s3:GetObject"
+        ]
+        Resource = "${aws_s3_bucket.uploads.arn}/*"
+      },
+      {
+        Sid    = "KMSForPHI"
+        Effect = "Allow"
+        Action = [
+          "kms:GenerateDataKey",
+          "kms:Decrypt"
+        ]
+        Resource = module.baseline.kms_key_arn
+      },
+      {
+        Sid      = "DLQSendMessage"
+        Effect   = "Allow"
+        Action   = "sqs:SendMessage"
+        Resource = module.baseline.lambda_dlq_arn
+      }
+    ]
+  })
+}
+
+resource "aws_lambda_function_event_invoke_config" "intake" {
+  function_name = aws_lambda_function.intake.function_name
+
+  destination_config {
+    on_failure {
+      destination = module.baseline.lambda_dlq_arn
+    }
+  }
+}
+
+######################################################################
+# GAP-08: API Gateway — IAM role for CloudWatch log delivery.
+# API Gateway requires an account-level IAM role to push logs to
+# CloudWatch. This role + account setting enables access logging
+# on the stage below.
+######################################################################
+
+resource "aws_iam_role" "apigw_cloudwatch" {
+  name = "${local.name_prefix}-apigw-cw-${local.suffix}"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "apigateway.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "apigw_cloudwatch" {
+  role       = aws_iam_role.apigw_cloudwatch.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs"
+}
+
+resource "aws_api_gateway_account" "main" {
+  cloudwatch_role_arn = aws_iam_role.apigw_cloudwatch.arn
+}
+
+resource "aws_apigatewayv2_stage" "default_hardened" {
+  api_id      = aws_apigatewayv2_api.intake.id
+  name        = "hardened"
+  auto_deploy = true
+
+  access_log_settings {
+    destination_arn = module.baseline.apigw_log_group_arn
+    format = jsonencode({
+      requestId      = "$context.requestId"
+      ip             = "$context.identity.sourceIp"
+      requestTime    = "$context.requestTime"
+      httpMethod     = "$context.httpMethod"
+      routeKey       = "$context.routeKey"
+      status         = "$context.status"
+      responseLength = "$context.responseLength"
+    })
+  }
+
+  default_route_settings {
+    throttling_burst_limit = 100
+    throttling_rate_limit  = 50
+  }
+
+  depends_on = [aws_api_gateway_account.main]
 }
