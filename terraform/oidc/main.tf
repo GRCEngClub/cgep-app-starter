@@ -39,10 +39,9 @@ variable "role_name" {
 
 data "aws_caller_identity" "current" {}
 
-resource "aws_iam_openid_connect_provider" "github" {
-  url             = "https://token.actions.githubusercontent.com"
-  client_id_list  = ["sts.amazonaws.com"]
-  thumbprint_list = ["6938fd4d98bab03faadb97b34396831e3780aea1"]
+# Reuse account-wide GitHub OIDC provider (often created in Lab 4.x / prior apply).
+data "aws_iam_openid_connect_provider" "github" {
+  url = "https://token.actions.githubusercontent.com"
 }
 
 resource "aws_iam_role" "grc_gate" {
@@ -52,7 +51,7 @@ resource "aws_iam_role" "grc_gate" {
     Version = "2012-10-17"
     Statement = [{
       Effect    = "Allow"
-      Principal = { Federated = aws_iam_openid_connect_provider.github.arn }
+      Principal = { Federated = data.aws_iam_openid_connect_provider.github.arn }
       Action    = "sts:AssumeRoleWithWebIdentity"
       Condition = {
         StringEquals = {
@@ -105,5 +104,5 @@ output "role_arn" {
 }
 
 output "oidc_provider_arn" {
-  value = aws_iam_openid_connect_provider.github.arn
+  value = data.aws_iam_openid_connect_provider.github.arn
 }

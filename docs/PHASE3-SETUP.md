@@ -32,16 +32,23 @@ OIDC trust policy uses `github_org = "tiffanymwr15"` and `github_repo = "cgep-ap
 
 ## Step 0b: Remote state (required for CI)
 
-GitHub runners do not have your local `terraform.tfstate`. Without remote state, CI will fail or try to recreate resources.
-
-1. Create an S3 bucket + DynamoDB table for state locking (one-time).
-2. Copy `terraform/backend.tf.example` → `terraform/backend.tf` and fill in values.
-3. Migrate state locally:
+GitHub runners do not have your local `terraform.tfstate`. Bootstrap remote state once, then migrate.
 
 ```bash
 export AWS_PROFILE=capstone-deploy-user
-cd terraform
+
+# 1. Create state bucket + lock table
+cd terraform/bootstrap
+terraform init
+terraform apply
+
+# 2. Copy backend_snippet output into terraform/backend.tf
+terraform output backend_snippet
+
+# 3. Migrate existing local state to S3
+cd ..
 terraform init -migrate-state
+terraform plan   # should show 0 to change
 ```
 
 Confirm `terraform plan` shows **no changes** after migration.
