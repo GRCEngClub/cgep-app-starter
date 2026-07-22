@@ -16,8 +16,8 @@ fit given the federal pilot, but SOC 2 was chosen and every layer below is built
   naming the SOC 2 CC ID explicitly, before the 800-53 mechanics -- so the same control reads as
   (for example) CC6.1 in a Rego deny message and as "CC6.1, implemented via sc-28" in the OSCAL.
 - **Terraform override files, not hand-edited `main.tf`.** GAP-02 (DynamoDB encryption), GAP-05
-  (Lambda `vpc_config`), GAP-06 (reserved concurrency), GAP-07 (IAM policy), and GAP-08 (access
-  logging/throttling) are all arguments of resources the starter already declares -- Terraform has
+  (Lambda `vpc_config`), GAP-07 (IAM policy), and GAP-08 (access logging/throttling) are all
+  arguments of resources the starter already declares -- Terraform has
   no way to add those as new, separate resource blocks the way GAP-01/03/04 (new S3 sub-resources)
   work. `terraform/starter_override.tf` uses Terraform's native override-file mechanism
   (`*_override.tf`) instead, so `terraform/main.tf` stays byte-for-byte identical to the upstream
@@ -56,11 +56,17 @@ GAP-08) are closed partially in Terraform and documented, not silently dropped -
 
 ## Trade-offs
 
-- **GAP-06: no dead-letter queue.** The intake Lambda's only trigger is the synchronous API Gateway
-  proxy integration. Lambda DLQs only capture failures from *asynchronous* invocations, so a DLQ
-  here would never receive anything -- adding one would be compliance theater, not a control. What
-  was added instead: `reserved_concurrent_executions`, which is the meaningful CC7.2 lever for a
-  synchronous integration (bounds cost/blast-radius from runaway concurrency).
+- **GAP-06: no dead-letter queue, and no reserved concurrency either.** The intake Lambda's only
+  trigger is the synchronous API Gateway proxy integration. Lambda DLQs only capture failures from
+  *asynchronous* invocations, so a DLQ here would never receive anything -- adding one would be
+  compliance theater, not a control. `reserved_concurrent_executions` was the planned alternative
+  lever, but deploying it against the real sandbox account surfaced a hard constraint: this
+  account's total Lambda concurrency limit is 10 (`aws lambda get-account-settings`), and AWS
+  enforces a floor of 10 unreserved executions account-wide -- reserving *any* amount for a single
+  function drops the account below that floor and `PutFunctionConcurrency` fails outright. The
+  account-wide limit is itself already a (coarser, shared) ceiling on this single-function
+  workload, so nothing was silently left uncontrolled -- but a per-function reservation isn't
+  achievable in this account without first requesting a service-quota increase.
 - **GAP-01/GAP-04 Rego policies are scoped to `aws_s3_bucket.uploads` by name**, not every bucket in
   the config. An earlier draft checked all `aws_s3_bucket` resources generically and false-flagged
   the CloudTrail log bucket (which deliberately uses AES256, see above) as a GAP-01 violation.
@@ -80,7 +86,9 @@ GAP-08) are closed partially in Terraform and documented, not silently dropped -
 
 - Move the evidence vault into a separate AWS account from the workload, with cross-account
   replication, closing the "single account" trade-off above.
-- Add X-Ray tracing and a WAF in front of API Gateway (GAP-06/GAP-08's remaining pieces).
+- Add X-Ray tracing and a WAF in front of API Gateway (GAP-06/GAP-08's remaining pieces). Request a
+  Lambda concurrency service-quota increase for the sandbox account so
+  `reserved_concurrent_executions` becomes usable at all.
 - Grant CloudTrail its own KMS key-policy statements and move its log bucket onto the CMK too, once
   that policy has been tested against a real trail rather than assumed.
 - A manual approval gate between Conftest passing and `terraform apply`, for defense in depth beyond

@@ -25,10 +25,18 @@ resource "aws_dynamodb_table" "intake" {
 
 ######################################################################
 # GAP-05 (SOC 2 CC6.6): Lambda into the starter's private subnets.
-# GAP-06 (SOC 2 CC7.2), partial: reserved concurrency caps runaway scaling.
-# No dead_letter_config — the Lambda's only trigger is the synchronous API
-# Gateway proxy integration, and DLQs only capture failed *asynchronous*
-# invocations, so one here would never receive anything. X-Ray is deferred.
+# GAP-06 (SOC 2 CC7.2), partial: no reserved_concurrent_executions here --
+# this sandbox account's total Lambda concurrency limit is 10
+# (`aws lambda get-account-settings`), and AWS enforces a hard floor of 10
+# unreserved executions account-wide. Reserving any concurrency for a
+# single function in an account already at the 10-execution floor is
+# mathematically impossible (10 total - any reservation < the 10 floor);
+# PutFunctionConcurrency fails outright. The account-wide limit is itself
+# already a (coarser, shared) concurrency ceiling on this single-function
+# workload -- see WRITEUP.md. No dead_letter_config — the Lambda's only
+# trigger is the synchronous API Gateway proxy integration, and DLQs only
+# capture failed *asynchronous* invocations, so one here would never
+# receive anything. X-Ray is deferred.
 ######################################################################
 
 resource "aws_lambda_function" "intake" {
@@ -36,8 +44,6 @@ resource "aws_lambda_function" "intake" {
     subnet_ids         = aws_subnet.private[*].id
     security_group_ids = [aws_security_group.lambda.id]
   }
-
-  reserved_concurrent_executions = 5
 }
 
 ######################################################################

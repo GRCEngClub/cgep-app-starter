@@ -134,10 +134,9 @@
               {
                 "uuid": "7f8faf08-79bf-4399-96ea-b1f286ea7b60",
                 "control-id": "si-4",
-                "description": "Implements SOC 2 CC7.2 (system monitoring -- detection of anomalies, security events), partially. GAP-06: reserved_concurrent_executions caps runaway Lambda scaling; a dead-letter queue was deliberately not added because the Lambda's only trigger is the synchronous API Gateway proxy integration, and DLQs only capture failed *asynchronous* invocations. X-Ray tracing is not yet implemented. GAP-08: the API Gateway stage now has access logging and throttling; a WAF is not yet implemented. See WRITEUP.md, \"what you didn't get to.\"",
+                "description": "Implements SOC 2 CC7.2 (system monitoring -- detection of anomalies, security events), partially. GAP-06: no per-function reserved concurrency -- this sandbox account's total Lambda concurrency limit is 10 and AWS enforces a hard floor of 10 unreserved executions account-wide, so reserving any concurrency for a single function is not possible in this account (discovered via a real deploy attempt, not assumed); the account-wide limit itself already caps this single-function workload. A dead-letter queue was deliberately not added because the Lambda's only trigger is the synchronous API Gateway proxy integration, and DLQs only capture failed *asynchronous* invocations. X-Ray tracing is not yet implemented. GAP-08: the API Gateway stage now has access logging and throttling; a WAF is not yet implemented. See WRITEUP.md, \"what you didn't get to.\"",
                 "props": [
                   { "name": "implementation-status", "value": "partial" },
-                  { "name": "terraform-resource", "value": "aws_lambda_function.intake (reserved_concurrent_executions override)" },
                   { "name": "terraform-resource", "value": "aws_apigatewayv2_stage.default (access_log_settings, default_route_settings overrides)" },
                   { "name": "terraform-resource", "value": "aws_cloudwatch_log_group.apigw_access" }
                 ]

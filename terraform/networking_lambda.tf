@@ -27,6 +27,19 @@ resource "aws_security_group" "lambda" {
 }
 
 ######################################################################
+# Any Lambda with a vpc_config needs ec2:CreateNetworkInterface (and
+# friends) to attach an ENI in the target subnets -- a separate grant from
+# AWSLambdaBasicExecutionRole, which only covers CloudWatch Logs. Without
+# this, CreateFunction fails with "execution role does not have
+# permissions to call CreateNetworkInterface on EC2."
+######################################################################
+
+resource "aws_iam_role_policy_attachment" "lambda_vpc_access" {
+  role       = aws_iam_role.lambda.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+}
+
+######################################################################
 # GAP-05 (SOC 2 CC6.6): gateway endpoints so the now-VPC-bound Lambda can
 # still reach DynamoDB and S3 without traversing the public internet or
 # needing a NAT gateway. Gateway endpoints attach to route tables; the
