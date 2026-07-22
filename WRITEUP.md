@@ -37,6 +37,24 @@ fit given the federal pilot, but SOC 2 was chosen and every layer below is built
 - **Pipeline applies automatically on merge to `main`**, no manual post-merge approval gate. Simplest
   defensible choice for this scope -- the Conftest policy gate is the actual control that matters,
   and it runs pre-merge on every PR regardless.
+- **Remote Terraform state, bootstrapped by hand in `oidc/`.** CI can't manage infrastructure it has
+  no record of: without shared state, a GitHub Actions checkout would have no way to know the
+  workload's 42 resources already exist, and would plan to create a second, parallel copy of
+  everything. `oidc/main.tf` (applied once by hand, kept in its own root module and local state,
+  since it's what makes `terraform/`'s backend and CI's ability to authenticate possible in the
+  first place) provisions an S3 state bucket alongside the GitHub OIDC trust + IAM role.
+  `terraform/backend.tf` points at it and uses `use_lockfile` (native S3 state locking, Terraform
+  >= 1.10) rather than a separate DynamoDB lock table -- one fewer resource for the same guarantee.
+- **The CI role's IAM policy is scoped by service and resource-name pattern, not full per-resource
+  least privilege.** CGE-P Lab 4.3's reference OIDC module attaches AWS-managed `ReadOnlyAccess`,
+  because its pipeline only ever plans, never applies. This pipeline has a real Apply step, so the
+  role needs real write permissions; `oidc/main.tf`'s policy grants broad access within each AWS
+  service this workload touches (S3, DynamoDB, Lambda, the specific Lambda execution role, KMS,
+  CloudTrail, API Gateway, CloudWatch Logs), scoped by ARN pattern to the `acme-health-intake-*`
+  naming convention where the API supports resource-level permissions at all. EC2 networking
+  (VPC/subnet/route table/security group/endpoint create+delete) is the one statement that's
+  unavoidably `Resource: "*"` -- most of those actions don't support resource-level ARNs in IAM.
+  Tightening this to true least privilege is listed under "what we'd do with another sprint."
 
 ## Control coverage
 
@@ -93,6 +111,9 @@ GAP-08) are closed partially in Terraform and documented, not silently dropped -
   that policy has been tested against a real trail rather than assumed.
 - A manual approval gate between Conftest passing and `terraform apply`, for defense in depth beyond
   the policy gate alone.
+- Tighten the CI role's IAM policy (`oidc/main.tf`) from service-and-name-pattern scoping to true
+  per-resource least privilege, and move the EC2-networking statement off `Resource: "*"` wherever
+  the specific action actually supports resource-level ARNs.
 
 ## What we didn't get to
 

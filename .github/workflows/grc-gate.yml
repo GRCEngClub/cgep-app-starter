@@ -7,7 +7,9 @@
 # Conftest step now runs the six SOC 2 namespaces this repo ships (see
 # policies/*.rego) instead of the lab's NIST-flavored ones, and Sign/Upload
 # point at this repo's own evidence vault (terraform output
-# evidence_vault_bucket), not the lab's demo bucket.
+# evidence_vault_bucket), not the lab's demo bucket. Terraform version bumped
+# from the lab's 1.6.6 to 1.15.8: terraform/backend.tf's S3 backend uses
+# use_lockfile (native S3 state locking), which needs >= 1.10.
 name: grc-gate
 
 on:
@@ -41,7 +43,7 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: 1.6.6
+          terraform_version: 1.15.8
           terraform_wrapper: false
 
       - name: Install Conftest

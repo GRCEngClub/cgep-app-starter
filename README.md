@@ -47,10 +47,13 @@ cgep-app-starter/
 │   ├── s3_hardening.tf             # GAP-01, GAP-03, GAP-04 (new S3 sub-resources)
 │   ├── networking_lambda.tf        # GAP-05 support (SG, gateway VPC endpoints)
 │   ├── monitoring.tf                # GAP-08 support (CloudWatch log group)
-│   ├── starter_override.tf         # GAP-02, GAP-05, GAP-06, GAP-07, GAP-08 (Terraform
+│   ├── starter_override.tf         # GAP-02, GAP-05, GAP-07, GAP-08 (Terraform
 │   │                                # override file -- merges into the starter's own
 │   │                                # resource blocks without editing main.tf)
-│   └── outputs_grc.tf
+│   ├── outputs_grc.tf
+│   └── backend.tf                  # remote state -- see oidc/ for the bucket this points at
+├── oidc/                           # bootstrap: GitHub OIDC trust + CI's IAM role + the
+│                                    # state bucket above. Applied once by hand, not by CI.
 ├── policies/                       # 6 Rego policies + _test.rego, SOC 2 CC-mapped
 ├── scripts/
 │   ├── policy-gate.sh              # conftest runner (used locally; CI inlines the loop)
