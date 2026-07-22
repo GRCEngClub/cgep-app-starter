@@ -1,0 +1,153 @@
+# .github/workflows/grc-gate.yml
+#
+# Adapted from cgep-labs/.github/workflows/grc-gate.yml. Two changes from
+# the lab version: (1) the lab version never ran `terraform apply` -- this
+# one adds a real Apply step gated to pushes on main, so Plan + Policy gate
+# every PR and Apply + Sign + Upload only happen after merge; (2) the
+# Conftest step now runs the six SOC 2 namespaces this repo ships (see
+# policies/*.rego) instead of the lab's NIST-flavored ones, and Sign/Upload
+# point at this repo's own evidence vault (terraform output
+# evidence_vault_bucket), not the lab's demo bucket.
+name: grc-gate
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write       # required for AWS OIDC + Cosign keyless
+  contents: read
+  pull-requests: write  # required to comment on the PR
+
+env:
+  AWS_REGION: us-east-1
+  TF_WORKING_DIR: terraform
+
+jobs:
+  grc-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+          terraform_wrapper: false
+
+      - name: Install Conftest
+        run: |
+          curl -fsSL https://github.com/open-policy-agent/conftest/releases/download/v0.50.0/conftest_0.50.0_Linux_x86_64.tar.gz \
+            | tar -xz -C /usr/local/bin conftest
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.2.4'
+
+      # Step 1: Plan
+      - name: Plan
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform init -input=false
+          terraform validate
+          terraform plan -out=tfplan -no-color | tee plan.txt
+          terraform show -json tfplan > plan.json
+
+      # Step 2: Policy check
+      - name: Policy check
+        id: conftest
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          mkdir -p ../evidence
+          {
+            echo "["
+            FIRST=1
+            for ns in \
+              compliance.soc2.cc6_1_s3_kms \
+              compliance.soc2.cc6_1_dynamodb_kms \
+              compliance.soc2.cc6_7_s3_tls_only \
+              compliance.soc2.a1_2_s3_versioning \
+              compliance.soc2.cc6_3_iam_least_privilege \
+              compliance.soc2.cc6_6_lambda_vpc \
+            ; do
+              [[ $FIRST -eq 1 ]] && FIRST=0 || printf ","
+              conftest test --policy ../policies --namespace "$ns" --output=json plan.json || true
+            done
+            echo "]"
+          } > ../evidence/conftest-results.json
+          python3 -c '
+          import json, sys
+          d = json.load(open("../evidence/conftest-results.json"))
+          fails = sum(len(r.get("failures") or []) for results in d for r in results)
+          print(f"conftest failures: {fails}")
+          sys.exit(0 if fails == 0 else 1)
+          '
+
+      - name: Copy plan into evidence
+        if: always()
+        run: |
+          cp ${{ env.TF_WORKING_DIR }}/plan.json evidence/plan.json
+          cp ${{ env.TF_WORKING_DIR }}/plan.txt  evidence/plan.txt
+
+      # Step 3: Apply -- only after merge to main, never on a PR plan.
+      - name: Apply
+        id: apply
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform apply -auto-approve tfplan
+          echo "vault=$(terraform output -raw evidence_vault_bucket)" >> "$GITHUB_OUTPUT"
+
+      # Step 4 + 5: Sign + Upload -- same condition as Apply. Combined into
+      # one step (as in the lab version) since signing and uploading are
+      # one atomic evidence-handling operation, not two independently
+      # gate-able ones.
+      - name: Sign + Upload
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          VAULT: ${{ steps.apply.outputs.vault }}
+          RUN_ID: ${{ github.run_id }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          BUNDLE="evidence-${RUN_ID}-${SHA}.tar.gz"
+          ( cd evidence && tar czf "../${BUNDLE}" . )
+          shasum -a 256 "${BUNDLE}" | awk '{print $1}' > "${BUNDLE}.sha256"
+
+          cosign sign-blob --yes --bundle "${BUNDLE}.sig.bundle" "${BUNDLE}"
+
+          KEY_PREFIX="runs/${RUN_ID}"
+          aws s3 cp "${BUNDLE}"            "s3://${VAULT}/${KEY_PREFIX}/${BUNDLE}"
+          aws s3 cp "${BUNDLE}.sha256"     "s3://${VAULT}/${KEY_PREFIX}/${BUNDLE}.sha256"
+          aws s3 cp "${BUNDLE}.sig.bundle" "s3://${VAULT}/${KEY_PREFIX}/${BUNDLE}.sig.bundle"
+
+          VERSION_ID=$(aws s3api head-object --bucket "${VAULT}" --key "${KEY_PREFIX}/${BUNDLE}" --query VersionId --output text)
+          cat > receipt.json <<EOF
+          {
+            "run_id":"${RUN_ID}",
+            "vault":"${VAULT}",
+            "bundle_key":"${KEY_PREFIX}/${BUNDLE}",
+            "version_id":"${VERSION_ID}",
+            "sha256":"$(cat ${BUNDLE}.sha256)",
+            "commit":"${SHA}"
+          }
+          EOF
+          aws s3 cp receipt.json "s3://${VAULT}/${KEY_PREFIX}/receipt.json"
+
+      - name: Upload evidence artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grc-evidence-${{ github.run_id }}
+          path: evidence/
+          retention-days: 90

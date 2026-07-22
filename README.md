@@ -1,78 +1,64 @@
-# cgep-app-starter
+# Acme Health Patient Intake API — CGE-P Capstone (SOC 2 Type II)
 
-> Patient Intake API for "Acme Health". The deliberately-flawed workload your **CGE-P capstone** wraps with GRC controls.
+Fork of [`GRCEngClub/cgep-app-starter`](https://github.com/GRCEngClub/cgep-app-starter) wrapped with
+a Terraform GRC baseline, an OPA/Rego policy suite, a signing GitHub Actions pipeline, and an OSCAL
+component. Declared primary framework: **SOC 2 Type II** (see `WRITEUP.md` for the defense).
 
-## What this is
-
-A minimal AWS workload: VPC, Lambda, API Gateway, DynamoDB, S3. It ingests patient intake submissions over HTTPS. Think of it as a system you have just inherited from an engineering team and been asked to make audit-defensible.
-
-This repository ships **non-compliant on purpose**. Your job in the capstone is not to rewrite this app. Your job is to wrap it with the four CGE-P layers (Terraform GRC baseline, Rego policies, GitHub Actions evidence pipeline, OSCAL component) so the same workload becomes audit-defensible against HIPAA, SOC 2, and CMMC L2.
-
-## The deploy gate
-
-If you cannot deploy this starter, you cannot pass the capstone. Real GRC engineers inherit working systems. Step zero is making the system run.
+## For the grader
 
 ```bash
-git clone https://github.com/GRCEngClub/cgep-app-starter
+git clone https://github.com/samruss824/cgep-app-starter
 cd cgep-app-starter
 
-# Confirm you're authenticated to the right account:
-make creds AWS_PROFILE=<your-sandbox-profile>
-
+# Layer 1 -- deploy gate (same as upstream)
 make deploy AWS_PROFILE=<your-sandbox-profile>
-make test    AWS_PROFILE=<your-sandbox-profile>
+make test   AWS_PROFILE=<your-sandbox-profile>   # expect {"status": "received"}
+
+# Layer 2 -- policy suite
+opa test ./policies                              # expect PASS on every test
+
+# Layer 3 -- pipeline
+# See .github/workflows/grc-gate.yml and the repo's PR history for one
+# green (merged) PR and one red (blocked) PR.
+
+# Verify a signed evidence bundle end-to-end (SHA-256, Cosign/Rekor,
+# Object Lock retention):
+./scripts/verify-evidence.sh <run_id> --vault <evidence-vault-bucket> --profile <your-sandbox-profile>
+
+# Layer 4 -- OSCAL
+trestle validate -f oscal/components/acme-health-intake.json
 ```
 
-> **AWS SSO note:** if your profile is SSO-based, Terraform's AWS provider can fail to read it directly with `failed to find SSO session section`. The Makefile's `eval $(aws configure export-credentials)` pattern handles this. If you're running `terraform` commands by hand, do the same export first.
-
-Expected output of `make test`:
-
-```json
-{
-    "submission_id": "f1e3...",
-    "status": "received"
-}
-```
-
-When you're done exploring: `make destroy`.
-
-## What you build on top
-
-Fork the repo into your own `cgep-capstone` and add:
-
-1. **Layer 1 — GRC baseline (Terraform).** KMS keys, an S3 evidence vault with Object Lock, a CloudTrail trail. Bring this starter's data stores under your CMK.
-2. **Layer 2 — OPA policy suite (Rego).** Five or more policies that catch the named gaps in [GAPS.md](GAPS.md). Each policy maps to at least one control from the framework you choose.
-3. **Layer 3 — GitHub Actions pipeline.** Plan → Conftest gate → apply → Cosign sign → upload to vault.
-4. **Layer 4 — OSCAL component.** A `component-definition.json` describing how your governed system implements its controls.
-
-Full brief: `docs/labs/07_01_capstone_brief.md` in the course content repo.
-
-## Framework mapping is required
-
-Your capstone must declare a primary framework: **HIPAA Security Rule**, **SOC 2 Trust Services Criteria**, or **CMMC Level 2**. Every policy carries at least one control ID from your chosen framework. Your OSCAL component's `control-implementations` reference your framework's catalog.
-
-A starter mapping is in [FRAMEWORKS.md](FRAMEWORKS.md). It is not the only valid mapping. You're expected to defend yours.
-
-## Cost
-
-Roughly $0 if destroyed within an hour. Lambda + API Gateway + DynamoDB + S3 are all pay-per-use, and an empty deployment generates no traffic. CloudTrail (which you add) costs cents.
+When you're done: `make destroy`.
 
 ## Layout
 
 ```
 cgep-app-starter/
-├── README.md            # this file
-├── WORKLOAD.md          # what the API does
-├── GAPS.md              # the named flaws your policies must catch
-├── FRAMEWORKS.md        # HIPAA / SOC 2 / CMMC mapping primer
-├── Makefile             # make deploy | test | destroy
+├── README.md                       # this file
+├── WRITEUP.md                      # design decisions, control coverage, trade-offs
+├── WORKLOAD.md, GAPS.md, FRAMEWORKS.md   # upstream starter docs, unchanged
+├── Makefile
 ├── terraform/
-│   ├── main.tf
-│   ├── variables.tf
-│   ├── outputs.tf
-│   └── lambda/handler.py
-└── test/
-    └── intake.sh
+│   ├── main.tf, variables.tf, outputs.tf, lambda/  # upstream starter, unchanged
+│   ├── kms.tf                      # customer-managed key
+│   ├── evidence_vault.tf           # Object Lock evidence bucket, KMS-encrypted
+│   ├── cloudtrail.tf               # multi-region trail + dedicated log bucket
+│   ├── s3_hardening.tf             # GAP-01, GAP-03, GAP-04 (new S3 sub-resources)
+│   ├── networking_lambda.tf        # GAP-05 support (SG, gateway VPC endpoints)
+│   ├── monitoring.tf                # GAP-08 support (CloudWatch log group)
+│   ├── starter_override.tf         # GAP-02, GAP-05, GAP-06, GAP-07, GAP-08 (Terraform
+│   │                                # override file -- merges into the starter's own
+│   │                                # resource blocks without editing main.tf)
+│   └── outputs_grc.tf
+├── policies/                       # 6 Rego policies + _test.rego, SOC 2 CC-mapped
+├── scripts/
+│   ├── policy-gate.sh              # conftest runner (used locally; CI inlines the loop)
+│   └── verify-evidence.sh          # the 3 checks the grader runs on a signed bundle
+├── .github/workflows/grc-gate.yml  # Plan -> Policy check -> Apply -> Sign -> Upload
+└── oscal/
+    ├── components/acme-health-intake.json
+    └── profiles/soc2-minimum.json
 ```
 
 ## License

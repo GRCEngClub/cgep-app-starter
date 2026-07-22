@@ -1,0 +1,151 @@
+{
+  "component-definition": {
+    "uuid": "a371c0ed-f76b-4fee-960e-a461704e3137",
+    "metadata": {
+      "title": "Acme Health Patient Intake API - SOC 2 GRC baseline",
+      "last-modified": "2026-07-18T00:00:00.000000+00:00",
+      "version": "0.1.0",
+      "oscal-version": "1.1.3",
+      "parties": [
+        {
+          "uuid": "9d9be2a7-2456-46ad-8e68-266cf3841f54",
+          "type": "organization",
+          "name": "samruss824"
+        }
+      ]
+    },
+    "components": [
+      {
+        "uuid": "de84760b-e99c-4fce-b803-edece5b08b19",
+        "type": "software",
+        "title": "acme-health-intake-grc-baseline",
+        "description": "The Acme Health Patient Intake API (forked from GRCEngClub/cgep-app-starter) plus the GRC baseline wrapped around it: a customer-managed KMS key, an Object Lock evidence vault, a multi-region CloudTrail, and Terraform overrides closing GAP-01, GAP-02, GAP-03, GAP-04, GAP-05, and GAP-07 from the starter's GAPS.md.",
+        "purpose": "Make the starter's PHI-handling intake workload audit-defensible against SOC 2 Trust Services Criteria without slowing down the engineering team.",
+        "responsible-roles": [
+          { "role-id": "provider", "party-uuids": ["9d9be2a7-2456-46ad-8e68-266cf3841f54"] }
+        ],
+        "control-implementations": [
+          {
+            "uuid": "faf9bc0a-f180-4570-bc2e-ef91f56ba170",
+            "source": "https://raw.githubusercontent.com/usnistgov/oscal-content/main/nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_catalog.json",
+            "description": "SOC 2 Type II is this component's declared primary framework (see WRITEUP.md). AICPA publishes no official OSCAL catalog for the Trust Services Criteria, so per the starter's FRAMEWORKS.md guidance, each SOC 2 criterion below is mapped to its closest NIST SP 800-53 Rev 5 control and that catalog is cited as source. Every implemented-requirement's description names the SOC 2 CC ID first so it reads as the same control the corresponding Rego policy in policies/ cites.",
+            "implemented-requirements": [
+              {
+                "uuid": "e9f9f012-40b3-4af7-ab7a-b551299cfee8",
+                "control-id": "sc-28",
+                "description": "Implements SOC 2 CC6.1 (logical access controls -- restrict access to information assets). Closes GAP-01: the uploads bucket's AWS-managed SSE-S3 default is replaced with SSE-KMS under a customer-managed key, so PHI keys are under customer custody, not AWS's.",
+                "props": [
+                  { "name": "implementation-status", "value": "implemented" },
+                  { "name": "terraform-resource", "value": "aws_s3_bucket_server_side_encryption_configuration.uploads" },
+                  { "name": "terraform-resource", "value": "aws_kms_key.grc" }
+                ],
+                "links": [
+                  {
+                    "rel": "evidence",
+                    "href": "s3://EVIDENCE_VAULT_BUCKET/runs/RUN_ID/evidence-RUN_ID-SHA.tar.gz",
+                    "text": "TODO (Week 4): replace with the real vault bucket/run ID/SHA from the first pipeline run on main. Signed pipeline bundle's terraform/plan.json will show sse_algorithm = \"aws:kms\" with kms_master_key_id resolving to aws_kms_key.grc."
+                  }
+                ]
+              },
+              {
+                "uuid": "887079cd-b8e8-4a60-8b5e-dc2499a4bb69",
+                "control-id": "sc-28",
+                "description": "Implements SOC 2 CC6.1 (logical access controls -- restrict access to information assets). Closes GAP-02: the submissions table's AWS-owned default key is replaced with the same customer-managed CMK used by the uploads bucket.",
+                "props": [
+                  { "name": "implementation-status", "value": "implemented" },
+                  { "name": "terraform-resource", "value": "aws_dynamodb_table.intake (server_side_encryption override, see terraform/starter_override.tf)" },
+                  { "name": "terraform-resource", "value": "aws_kms_key.grc" }
+                ],
+                "links": [
+                  {
+                    "rel": "evidence",
+                    "href": "s3://EVIDENCE_VAULT_BUCKET/runs/RUN_ID/evidence-RUN_ID-SHA.tar.gz",
+                    "text": "TODO (Week 4): replace with the real vault bucket/run ID/SHA. Bundle's plan.json will show the table's server_side_encryption block with kms_key_arn resolving to aws_kms_key.grc."
+                  }
+                ]
+              },
+              {
+                "uuid": "a7a19f4e-7e61-4845-860c-9febe60a61ba",
+                "control-id": "sc-8",
+                "description": "Implements SOC 2 CC6.7 (transmission security -- protect data in transit). Closes GAP-03: the uploads bucket now carries a bucket policy denying any request where aws:SecureTransport is false.",
+                "props": [
+                  { "name": "implementation-status", "value": "implemented" },
+                  { "name": "terraform-resource", "value": "aws_s3_bucket_policy.uploads_tls_only" }
+                ],
+                "links": [
+                  {
+                    "rel": "evidence",
+                    "href": "s3://EVIDENCE_VAULT_BUCKET/runs/RUN_ID/evidence-RUN_ID-SHA.tar.gz",
+                    "text": "TODO (Week 4): replace with the real vault bucket/run ID/SHA. Conftest output for compliance.soc2.cc6_7_s3_tls_only in the bundle confirms the Deny/SecureTransport statement."
+                  }
+                ]
+              },
+              {
+                "uuid": "d15989b8-0a83-4524-aa90-34eb26896586",
+                "control-id": "cp-9",
+                "description": "Implements SOC 2 A1.2 (system availability -- backup, recovery). Closes GAP-04: versioning is enabled on the uploads bucket, so an overwritten or deleted PHI object is recoverable.",
+                "props": [
+                  { "name": "implementation-status", "value": "implemented" },
+                  { "name": "terraform-resource", "value": "aws_s3_bucket_versioning.uploads" }
+                ],
+                "links": [
+                  {
+                    "rel": "evidence",
+                    "href": "s3://EVIDENCE_VAULT_BUCKET/runs/RUN_ID/evidence-RUN_ID-SHA.tar.gz",
+                    "text": "TODO (Week 4): replace with the real vault bucket/run ID/SHA. Bundle's plan.json shows versioning_configuration.status = \"Enabled\"."
+                  }
+                ]
+              },
+              {
+                "uuid": "5c21ffc7-d117-404a-9fc4-70ad0d07dafa",
+                "control-id": "sc-7",
+                "description": "Implements SOC 2 CC6.6 (boundary protection -- protect from unauthorized access to internal information). Closes GAP-05: the intake Lambda now runs inside the starter's private subnets instead of the default (boundary-less) Lambda environment, reachable via dedicated gateway VPC endpoints rather than the public internet.",
+                "props": [
+                  { "name": "implementation-status", "value": "implemented" },
+                  { "name": "terraform-resource", "value": "aws_lambda_function.intake (vpc_config override, see terraform/starter_override.tf)" },
+                  { "name": "terraform-resource", "value": "aws_security_group.lambda" },
+                  { "name": "terraform-resource", "value": "aws_vpc_endpoint.s3" },
+                  { "name": "terraform-resource", "value": "aws_vpc_endpoint.dynamodb" }
+                ],
+                "links": [
+                  {
+                    "rel": "evidence",
+                    "href": "s3://EVIDENCE_VAULT_BUCKET/runs/RUN_ID/evidence-RUN_ID-SHA.tar.gz",
+                    "text": "TODO (Week 4): replace with the real vault bucket/run ID/SHA. Conftest output for compliance.soc2.cc6_6_lambda_vpc confirms the vpc_config block."
+                  }
+                ]
+              },
+              {
+                "uuid": "73dd1604-2647-44f5-a3dd-0567b63b3d78",
+                "control-id": "ac-6",
+                "description": "Implements SOC 2 CC6.3 (authorization -- least privilege, periodic access reviews). Closes GAP-07: the Lambda's inline role policy no longer grants dynamodb:*/s3:*; it is scoped to exactly the actions terraform/lambda/handler.py performs (dynamodb:PutItem, s3:PutObject) plus the KMS actions needed to write through the CMK.",
+                "props": [
+                  { "name": "implementation-status", "value": "implemented" },
+                  { "name": "terraform-resource", "value": "aws_iam_role_policy.lambda_inline (policy override, see terraform/starter_override.tf)" }
+                ],
+                "links": [
+                  {
+                    "rel": "evidence",
+                    "href": "s3://EVIDENCE_VAULT_BUCKET/runs/RUN_ID/evidence-RUN_ID-SHA.tar.gz",
+                    "text": "TODO (Week 4): replace with the real vault bucket/run ID/SHA. Conftest output for compliance.soc2.cc6_3_iam_least_privilege confirms no wildcard actions remain."
+                  }
+                ]
+              },
+              {
+                "uuid": "7f8faf08-79bf-4399-96ea-b1f286ea7b60",
+                "control-id": "si-4",
+                "description": "Implements SOC 2 CC7.2 (system monitoring -- detection of anomalies, security events), partially. GAP-06: reserved_concurrent_executions caps runaway Lambda scaling; a dead-letter queue was deliberately not added because the Lambda's only trigger is the synchronous API Gateway proxy integration, and DLQs only capture failed *asynchronous* invocations. X-Ray tracing is not yet implemented. GAP-08: the API Gateway stage now has access logging and throttling; a WAF is not yet implemented. See WRITEUP.md, \"what you didn't get to.\"",
+                "props": [
+                  { "name": "implementation-status", "value": "partial" },
+                  { "name": "terraform-resource", "value": "aws_lambda_function.intake (reserved_concurrent_executions override)" },
+                  { "name": "terraform-resource", "value": "aws_apigatewayv2_stage.default (access_log_settings, default_route_settings overrides)" },
+                  { "name": "terraform-resource", "value": "aws_cloudwatch_log_group.apigw_access" }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
