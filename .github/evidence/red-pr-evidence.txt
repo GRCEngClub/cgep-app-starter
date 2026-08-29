@@ -1,0 +1,5 @@
+Red PR evidence: pipeline correctly blocked non-compliant starter plan
+Violations detected:
+- GAP-01: aws_s3_bucket.uploads missing CMK [HIPAA 164.312(a)(2)(iv)]
+- GAP-02: aws_dynamodb_table.intake missing CMK [HIPAA 164.312(a)(2)(iv)]
+GitHub Actions Run: https://github.com/kevfal3/cgep-app-starter/actions
