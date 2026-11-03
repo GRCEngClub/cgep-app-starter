@@ -1,6 +1,5 @@
 # Terraform
 .terraform/
-.terraform.lock.hcl
 *.tfstate
 *.tfstate.*
 *.tfvars
@@ -15,3 +14,11 @@ terraform/lambda/handler.zip
 # Local
 evidence/
 .DS_Store
+
+# Terraform-generated validation files
+terraform/policy-check.json
+terraform/policy-check.tfplan
+terraform/*.tfplan
+terraform/*.tfplan.json
+
+terraform/terraform-state-backup.json

@@ -111,8 +111,12 @@ resource "aws_dynamodb_table" "intake" {
     type = "S"
   }
 
-  # No server_side_encryption block. Defaults to AWS-owned key.
-  # GAP-02: capstone learner expected to add this with a customer-owned key.
+
+  # GAP-02 — Customer-managed KMS encryption
+  server_side_encryption {
+    enabled     = true
+    kms_key_arn = aws_kms_key.grc.arn
+  }
 }
 
 ######################################################################
@@ -132,9 +136,63 @@ resource "aws_s3_bucket" "uploads" {
   bucket = "${local.name_prefix}-uploads-${local.suffix}"
 }
 
-# (Intentionally omitted: SSE-KMS encryption with a customer CMK,
-#  bucket policy enforcing aws:SecureTransport, versioning, lifecycle.
-#  These are the gaps the learner closes.)
+
+# GAP-01 — Customer-managed encryption for patient uploads
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "uploads" {
+  bucket = aws_s3_bucket.uploads.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.grc.arn
+    }
+
+    bucket_key_enabled = true
+  }
+}
+
+
+# GAP-03 — Enforce TLS for patient uploads
+
+resource "aws_s3_bucket_policy" "uploads_tls" {
+  bucket = aws_s3_bucket.uploads.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+
+    Statement = [
+      {
+        Sid       = "DenyInsecureTransport"
+        Effect    = "Deny"
+        Principal = "*"
+        Action    = "s3:*"
+
+        Resource = [
+          aws_s3_bucket.uploads.arn,
+          "${aws_s3_bucket.uploads.arn}/*"
+        ]
+
+        Condition = {
+          Bool = {
+            "aws:SecureTransport" = "false"
+          }
+        }
+      }
+    ]
+  })
+}
+
+
+# GAP-04 — Enable versioning for patient uploads
+
+resource "aws_s3_bucket_versioning" "uploads" {
+  bucket = aws_s3_bucket.uploads.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
 
 ######################################################################
 # Lambda — the intake handler.
@@ -167,7 +225,16 @@ resource "aws_iam_role_policy_attachment" "lambda_basic" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-# GAP-07: deliberately broad permissions on the workload data stores.
+
+# GAP-05 — Allow Lambda to manage VPC network interfaces
+resource "aws_iam_role_policy_attachment" "lambda_vpc" {
+  role       = aws_iam_role.lambda.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+}
+
+
+# GAP-07 — Enforce least privilege for Lambda
+
 resource "aws_iam_role_policy" "lambda_inline" {
   name = "intake-data-access"
   role = aws_iam_role.lambda.id
@@ -176,18 +243,47 @@ resource "aws_iam_role_policy" "lambda_inline" {
     Version = "2012-10-17"
     Statement = [
       {
+        Sid      = "WriteIntakeSubmission"
         Effect   = "Allow"
-        Action   = "dynamodb:*"
+        Action   = ["dynamodb:PutItem"]
         Resource = aws_dynamodb_table.intake.arn
       },
       {
+        Sid      = "UploadPatientAttachment"
         Effect   = "Allow"
-        Action   = "s3:*"
-        Resource = ["${aws_s3_bucket.uploads.arn}", "${aws_s3_bucket.uploads.arn}/*"]
+        Action   = ["s3:PutObject"]
+        Resource = "${aws_s3_bucket.uploads.arn}/uploads/*"
+      },
+      {
+        Sid    = "UseCustomerManagedKey"
+        Effect = "Allow"
+        Action = [
+          "kms:GenerateDataKey",
+          "kms:Decrypt",
+          "kms:DescribeKey"
+        ]
+
+        Resource = aws_kms_key.grc.arn
+      },
+      {
+        Sid      = "SendFailedEventsToDLQ"
+        Effect   = "Allow"
+        Action   = ["sqs:SendMessage"]
+        Resource = aws_sqs_queue.intake_dlq.arn
+      },
+      {
+        Sid    = "WriteXRayTraces"
+        Effect = "Allow"
+        Action = [
+          "xray:PutTraceSegments",
+          "xray:PutTelemetryRecords"
+        ]
+        Resource = "*"
       }
     ]
   })
 }
+
 
 resource "aws_lambda_function" "intake" {
   function_name    = "${local.name_prefix}-handler-${local.suffix}"
@@ -198,6 +294,23 @@ resource "aws_lambda_function" "intake" {
   source_code_hash = data.archive_file.handler.output_base64sha256
   timeout          = 10
 
+  # GAP-06 — Reserved concurrency limitation
+  # AWS sandbox account concurrency quota is 10.
+  # AWS requires a minimum of 10 unreserved executions.
+  # Reserved concurrency will be configured after a quota increase.
+
+
+  # GAP-06 — Enable AWS X-Ray tracing
+  tracing_config {
+    mode = "Active"
+  }
+
+  # GAP-06 — Failed asynchronous invocation handling
+  dead_letter_config {
+    target_arn = aws_sqs_queue.intake_dlq.arn
+  }
+
+
   environment {
     variables = {
       INTAKE_TABLE  = aws_dynamodb_table.intake.name
@@ -205,8 +318,15 @@ resource "aws_lambda_function" "intake" {
     }
   }
 
-  # GAP-05: no vpc_config block. Learner expected to add one referencing
-  # aws_subnet.private[*] and a hardened security group.
+  # GAP-05 — Deploy Lambda into the existing VPC
+  vpc_config {
+    subnet_ids         = aws_subnet.private[*].id
+    security_group_ids = [aws_security_group.lambda.id]
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.lambda_vpc
+  ]
 }
 
 ######################################################################
@@ -233,12 +353,33 @@ resource "aws_apigatewayv2_route" "intake" {
   target    = "integrations/${aws_apigatewayv2_integration.lambda.id}"
 }
 
+
+# GAP-08 — API access logging and throttling
+
 resource "aws_apigatewayv2_stage" "default" {
   api_id      = aws_apigatewayv2_api.intake.id
   name        = "$default"
   auto_deploy = true
-  # GAP-08: no access_log_settings. Learner expected to wire CloudWatch logs.
+
+  access_log_settings {
+    destination_arn = aws_cloudwatch_log_group.api_access.arn
+
+    format = jsonencode({
+      requestId      = "$context.requestId"
+      requestTime    = "$context.requestTime"
+      routeKey       = "$context.routeKey"
+      status         = "$context.status"
+      responseLength = "$context.responseLength"
+      sourceIp       = "$context.identity.sourceIp"
+    })
+  }
+
+  default_route_settings {
+    throttling_burst_limit = 20
+    throttling_rate_limit  = 10
+  }
 }
+
 
 resource "aws_lambda_permission" "apigw" {
   statement_id  = "AllowAPIGatewayInvoke"
