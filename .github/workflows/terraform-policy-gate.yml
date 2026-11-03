@@ -1,0 +1,78 @@
+
+name: CMMC Terraform Policy Gate
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  terraform-policy-check:
+    name: Terraform Plan and Conftest
+    runs-on: ubuntu-latest
+
+    # Only validate PRs from the capstone owner's own repository.
+    # Do not give AWS credentials to external fork PRs.
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == 'ankojay14-cyber'
+
+    defaults:
+      run:
+        working-directory: terraform
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: 1.16.0
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::804450520828:role/cgep-capstone-pr-validation
+          aws-region: us-east-1
+
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Terraform Validate
+        run: terraform validate -no-color
+
+      - name: Generate Terraform Plan
+        run: terraform plan -input=false -no-color -out=ci.tfplan
+
+      - name: Export Terraform Plan JSON
+        run: terraform show -json ci.tfplan > ci-plan.json
+
+      - name: Install Conftest
+        run: |
+          curl -fsSL \
+            https://github.com/open-policy-agent/conftest/releases/download/v0.64.0/conftest_0.64.0_Linux_x86_64.tar.gz \
+            -o conftest.tar.gz
+          tar -xzf conftest.tar.gz conftest
+          sudo install conftest /usr/local/bin/conftest
+          conftest --version
+
+      - name: Enforce CMMC Rego Policies
+        run: |
+          conftest test ci-plan.json \
+            --policy ../policies/gap01_s3_encryption.rego \
+            --policy ../policies/gap02_dynamodb_encryption.rego \
+            --policy ../policies/gap03_s3_tls.rego \
+            --policy ../policies/gap04_s3_versioning.rego \
+            --policy ../policies/gap05_lambda_vpc.rego \
+            --all-namespaces
+
+      - name: Confirm Policy Gate Passed
+        run: echo "All five CMMC policy checks passed."
