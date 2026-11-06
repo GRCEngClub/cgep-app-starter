@@ -99,6 +99,7 @@ resource "aws_route_table_association" "public" {
 ######################################################################
 # DynamoDB — submissions table.
 # GAP-02: encryption uses AWS-owned default, not a CMK you control.
+# CLOSED: server_side_encryption block below uses our CMK (kms.tf).
 ######################################################################
 
 resource "aws_dynamodb_table" "intake" {
@@ -111,8 +112,11 @@ resource "aws_dynamodb_table" "intake" {
     type = "S"
   }
 
-  # No server_side_encryption block. Defaults to AWS-owned key.
-  # GAP-02: capstone learner expected to add this with a customer-owned key.
+  # GAP-02 closed (CMMC SC.L2-3.13.11): table encrypted with our CMK.
+  server_side_encryption {
+    enabled     = true
+    kms_key_arn = aws_kms_key.phi.arn
+  }
 }
 
 ######################################################################
@@ -126,15 +130,14 @@ resource "aws_dynamodb_table" "intake" {
 #
 # Note: AWS now defaults new buckets to SSE-S3 + full public access block.
 # The "gaps" here are real residual gaps once those defaults are in place.
+#
+# CLOSED in hardening.tf: GAP-01 (SSE-KMS with our CMK), GAP-03 (TLS-only
+# bucket policy), GAP-04 (versioning).
 ######################################################################
 
 resource "aws_s3_bucket" "uploads" {
   bucket = "${local.name_prefix}-uploads-${local.suffix}"
 }
-
-# (Intentionally omitted: SSE-KMS encryption with a customer CMK,
-#  bucket policy enforcing aws:SecureTransport, versioning, lifecycle.
-#  These are the gaps the learner closes.)
 
 ######################################################################
 # Lambda — the intake handler.
@@ -167,7 +170,9 @@ resource "aws_iam_role_policy_attachment" "lambda_basic" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-# GAP-07: deliberately broad permissions on the workload data stores.
+# GAP-07 closed (CMMC AC.L2-3.1.5): least privilege. The handler only calls
+# dynamodb:PutItem and s3:PutObject (under uploads/), plus the key actions
+# needed to use our CMK for those two services. Nothing else.
 resource "aws_iam_role_policy" "lambda_inline" {
   name = "intake-data-access"
   role = aws_iam_role.lambda.id
@@ -176,14 +181,28 @@ resource "aws_iam_role_policy" "lambda_inline" {
     Version = "2012-10-17"
     Statement = [
       {
+        Sid      = "WriteIntakeSubmissions"
         Effect   = "Allow"
-        Action   = "dynamodb:*"
+        Action   = "dynamodb:PutItem"
         Resource = aws_dynamodb_table.intake.arn
       },
       {
+        Sid      = "WriteUploads"
         Effect   = "Allow"
-        Action   = "s3:*"
-        Resource = ["${aws_s3_bucket.uploads.arn}", "${aws_s3_bucket.uploads.arn}/*"]
+        Action   = "s3:PutObject"
+        Resource = "${aws_s3_bucket.uploads.arn}/uploads/*"
+      },
+      {
+        Sid    = "UseDataCmk"
+        Effect = "Allow"
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ]
+        Resource = aws_kms_key.phi.arn
       }
     ]
   })
@@ -205,8 +224,19 @@ resource "aws_lambda_function" "intake" {
     }
   }
 
-  # GAP-05: no vpc_config block. Learner expected to add one referencing
-  # aws_subnet.private[*] and a hardened security group.
+  # GAP-05 closed (CMMC SC.L2-3.13.1): Lambda runs in the starter's own VPC,
+  # in the private subnets, with the hardened security group from
+  # lambda-vpc.tf. No second VPC.
+  vpc_config {
+    subnet_ids         = aws_subnet.private[*].id
+    security_group_ids = [aws_security_group.lambda.id]
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.lambda_vpc,
+    aws_vpc_endpoint.s3,
+    aws_vpc_endpoint.dynamodb,
+  ]
 }
 
 ######################################################################
