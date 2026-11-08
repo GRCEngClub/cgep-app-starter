@@ -73,25 +73,29 @@ resource "aws_s3_bucket_public_access_block" "evidence" {
   restrict_public_buckets = true
 }
 
+data "aws_iam_policy_document" "evidence_tls_only" {
+  statement {
+    sid       = "DenyInsecureTransport"
+    effect    = "Deny"
+    actions   = ["s3:*"]
+    resources = [aws_s3_bucket.evidence.arn, "${aws_s3_bucket.evidence.arn}/*"]
+
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+
+    condition {
+      test     = "Bool"
+      variable = "aws:SecureTransport"
+      values   = ["false"]
+    }
+  }
+}
+
 resource "aws_s3_bucket_policy" "evidence_tls_only" {
   bucket = aws_s3_bucket.evidence.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Sid       = "DenyInsecureTransport"
-      Effect    = "Deny"
-      Principal = "*"
-      Action    = "s3:*"
-      Resource = [
-        aws_s3_bucket.evidence.arn,
-        "${aws_s3_bucket.evidence.arn}/*"
-      ]
-      Condition = {
-        Bool = { "aws:SecureTransport" = "false" }
-      }
-    }]
-  })
+  policy = data.aws_iam_policy_document.evidence_tls_only.json
 
   depends_on = [aws_s3_bucket_public_access_block.evidence]
 }

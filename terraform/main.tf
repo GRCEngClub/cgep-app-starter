@@ -173,39 +173,41 @@ resource "aws_iam_role_policy_attachment" "lambda_basic" {
 # GAP-07 closed (CMMC AC.L2-3.1.5): least privilege. The handler only calls
 # dynamodb:PutItem and s3:PutObject (under uploads/), plus the key actions
 # needed to use our CMK for those two services. Nothing else.
-resource "aws_iam_role_policy" "lambda_inline" {
-  name = "intake-data-access"
-  role = aws_iam_role.lambda.id
+# Written as an aws_iam_policy_document (not jsonencode) so the Rego policy
+# can read the actions at plan time, even on a fresh account.
+data "aws_iam_policy_document" "lambda_inline" {
+  statement {
+    sid       = "WriteIntakeSubmissions"
+    effect    = "Allow"
+    actions   = ["dynamodb:PutItem"]
+    resources = [aws_dynamodb_table.intake.arn]
+  }
 
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid      = "WriteIntakeSubmissions"
-        Effect   = "Allow"
-        Action   = "dynamodb:PutItem"
-        Resource = aws_dynamodb_table.intake.arn
-      },
-      {
-        Sid      = "WriteUploads"
-        Effect   = "Allow"
-        Action   = "s3:PutObject"
-        Resource = "${aws_s3_bucket.uploads.arn}/uploads/*"
-      },
-      {
-        Sid    = "UseDataCmk"
-        Effect = "Allow"
-        Action = [
-          "kms:Encrypt",
-          "kms:Decrypt",
-          "kms:ReEncrypt*",
-          "kms:GenerateDataKey*",
-          "kms:DescribeKey"
-        ]
-        Resource = aws_kms_key.phi.arn
-      }
+  statement {
+    sid       = "WriteUploads"
+    effect    = "Allow"
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.uploads.arn}/uploads/*"]
+  }
+
+  statement {
+    sid    = "UseDataCmk"
+    effect = "Allow"
+    actions = [
+      "kms:Encrypt",
+      "kms:Decrypt",
+      "kms:ReEncrypt*",
+      "kms:GenerateDataKey*",
+      "kms:DescribeKey",
     ]
-  })
+    resources = [aws_kms_key.phi.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "lambda_inline" {
+  name   = "intake-data-access"
+  role   = aws_iam_role.lambda.id
+  policy = data.aws_iam_policy_document.lambda_inline.json
 }
 
 resource "aws_lambda_function" "intake" {

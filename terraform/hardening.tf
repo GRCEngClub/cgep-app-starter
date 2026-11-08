@@ -27,23 +27,28 @@ resource "aws_s3_bucket_versioning" "uploads" {
 }
 
 # GAP-03 (CMMC SC.L2-3.13.8): deny any request that is not over TLS.
+# Written as an aws_iam_policy_document so the Rego policy can verify it.
+data "aws_iam_policy_document" "uploads_tls_only" {
+  statement {
+    sid       = "DenyInsecureTransport"
+    effect    = "Deny"
+    actions   = ["s3:*"]
+    resources = [aws_s3_bucket.uploads.arn, "${aws_s3_bucket.uploads.arn}/*"]
+
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+
+    condition {
+      test     = "Bool"
+      variable = "aws:SecureTransport"
+      values   = ["false"]
+    }
+  }
+}
+
 resource "aws_s3_bucket_policy" "uploads_tls_only" {
   bucket = aws_s3_bucket.uploads.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Sid       = "DenyInsecureTransport"
-      Effect    = "Deny"
-      Principal = "*"
-      Action    = "s3:*"
-      Resource = [
-        aws_s3_bucket.uploads.arn,
-        "${aws_s3_bucket.uploads.arn}/*"
-      ]
-      Condition = {
-        Bool = { "aws:SecureTransport" = "false" }
-      }
-    }]
-  })
+  policy = data.aws_iam_policy_document.uploads_tls_only.json
 }
