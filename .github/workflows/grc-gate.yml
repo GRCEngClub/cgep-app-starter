@@ -1,0 +1,152 @@
+# grc-gate: continuous compliance pipeline for the Acme Health intake stack.
+#
+#   pull request -> plan -> policy gate (Conftest) -> sign + store evidence
+#                   (plan role: read-only, cannot change anything)
+#   merge to main -> plan -> policy gate -> APPLY -> sign + store evidence
+#                   (apply role: only assumable from the main branch)
+#
+# Evidence is signed and stored even when the gate fails; the build is failed
+# by the last step, so a blocked change still leaves a signed record.
+name: grc-gate
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write # AWS OIDC + Cosign keyless signing
+  contents: read
+
+concurrency:
+  group: grc-gate-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ca-central-1
+  TF_WORKING_DIR: terraform
+  EVIDENCE_DIR: evidence/pipeline
+
+jobs:
+  grc-gate:
+    name: grc-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pull requests get the read-only plan role; main gets the apply role.
+      - name: Configure AWS credentials (OIDC)
+        id: creds
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ github.event_name == 'pull_request' && vars.AWS_PLAN_ROLE_ARN || vars.AWS_APPLY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.16.0
+          terraform_wrapper: false
+
+      - name: Install Conftest
+        run: |
+          curl -fsSL https://github.com/open-policy-agent/conftest/releases/download/v0.56.0/conftest_0.56.0_Linux_x86_64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin conftest
+          conftest --version
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: v2.2.4
+
+      - name: Policy unit tests
+        run: conftest verify --policy policies
+
+      - name: Terraform init
+        run: terraform -chdir="$TF_WORKING_DIR" init -input=false
+
+      - name: Terraform validate
+        run: terraform -chdir="$TF_WORKING_DIR" validate
+
+      - name: Terraform plan
+        run: |
+          mkdir -p "$EVIDENCE_DIR"
+          terraform -chdir="$TF_WORKING_DIR" plan -out=tfplan -input=false -no-color | tee "$EVIDENCE_DIR/plan.txt"
+
+      # continue-on-error: a failed gate must not stop the evidence steps.
+      # The last step turns this outcome into a red build.
+      - name: Policy gate (Conftest)
+        id: gate
+        continue-on-error: true
+        run: bash scripts/policy-gate.sh --workspace "$TF_WORKING_DIR" --evidence "$EVIDENCE_DIR"
+
+      - name: Terraform apply
+        id: apply
+        if: github.event_name == 'push' && steps.gate.outcome == 'success'
+        continue-on-error: true
+        run: terraform -chdir="$TF_WORKING_DIR" apply -input=false -no-color tfplan | tee "$EVIDENCE_DIR/apply.txt"
+
+      - name: Record run metadata
+        if: always() && steps.creds.outcome == 'success'
+        env:
+          GATE: ${{ steps.gate.outcome }}
+          APPLY: ${{ steps.apply.outcome }}
+        run: |
+          cat > "$EVIDENCE_DIR/metadata.json" <<JSON
+          {
+            "run_id": "${{ github.run_id }}",
+            "run_attempt": "${{ github.run_attempt }}",
+            "event": "${{ github.event_name }}",
+            "ref": "${{ github.ref }}",
+            "commit": "${{ github.sha }}",
+            "actor": "${{ github.actor }}",
+            "workflow": "${{ github.workflow_ref }}",
+            "gate_outcome": "${GATE}",
+            "apply_outcome": "${APPLY}"
+          }
+          JSON
+
+      - name: Bundle, sign, and store evidence
+        id: sign
+        if: always() && steps.creds.outcome == 'success'
+        env:
+          VAULT: ${{ vars.EVIDENCE_VAULT }}
+          RUN_ID: ${{ github.run_id }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          BUNDLE="evidence-${RUN_ID}-${SHA}.tar.gz"
+          ( cd "$EVIDENCE_DIR" && tar czf "../../${BUNDLE}" . )
+          sha256sum "${BUNDLE}" | awk '{print $1}' > "${BUNDLE}.sha256"
+
+          # Keyless signature: Fulcio certificate + Rekor log entry, in one bundle file.
+          cosign sign-blob --yes --bundle "${BUNDLE}.sig.bundle" "${BUNDLE}"
+
+          PREFIX="runs/${RUN_ID}"
+          aws s3 cp "${BUNDLE}"            "s3://${VAULT}/${PREFIX}/${BUNDLE}"
+          aws s3 cp "${BUNDLE}.sha256"     "s3://${VAULT}/${PREFIX}/${BUNDLE}.sha256"
+          aws s3 cp "${BUNDLE}.sig.bundle" "s3://${VAULT}/${PREFIX}/${BUNDLE}.sig.bundle"
+
+          VERSION_ID=$(aws s3api head-object --bucket "${VAULT}" --key "${PREFIX}/${BUNDLE}" --query VersionId --output text)
+          cat > receipt.json <<JSON
+          {
+            "run_id": "${RUN_ID}",
+            "vault": "${VAULT}",
+            "bundle_key": "${PREFIX}/${BUNDLE}",
+            "version_id": "${VERSION_ID}",
+            "sha256": "$(cat "${BUNDLE}.sha256")",
+            "commit": "${SHA}"
+          }
+          JSON
+          aws s3 cp receipt.json "s3://${VAULT}/${PREFIX}/receipt.json"
+          cat receipt.json
+
+      # The only step that decides pass or fail.
+      - name: Enforce gate
+        if: always()
+        run: |
+          echo "gate=${{ steps.gate.outcome }} apply=${{ steps.apply.outcome }} sign=${{ steps.sign.outcome }}"
+          test "${{ steps.gate.outcome }}" = "success"
+          test "${{ steps.apply.outcome }}" != "failure"
+          test "${{ steps.sign.outcome }}" = "success"
