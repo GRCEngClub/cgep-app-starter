@@ -16,3 +16,6 @@ terraform/lambda/handler.zip
 evidence/
 .DS_Store
 plan.json
+bootstrap/.terraform/
+bootstrap/*.tfstate
+bootstrap/*.tfstate.*
