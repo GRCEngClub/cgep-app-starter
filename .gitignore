@@ -22,3 +22,4 @@ terraform/moto_override.tf
 # Moto local override
 terraform/moto_override.tf
 __pycache__/
+terraform/plan*.json
