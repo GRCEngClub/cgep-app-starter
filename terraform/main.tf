@@ -170,28 +170,6 @@ resource "aws_iam_role_policy_attachment" "lambda_basic" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-# GAP-07: deliberately broad permissions on the workload data stores.
-resource "aws_iam_role_policy" "lambda_inline" {
-  name = "intake-data-access"
-  role = aws_iam_role.lambda.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect   = "Allow"
-        Action   = "dynamodb:*"
-        Resource = aws_dynamodb_table.intake.arn
-      },
-      {
-        Effect   = "Allow"
-        Action   = "s3:*"
-        Resource = ["${aws_s3_bucket.uploads.arn}", "${aws_s3_bucket.uploads.arn}/*"]
-      }
-    ]
-  })
-}
-
 resource "aws_lambda_function" "intake" {
   function_name    = "${local.name_prefix}-handler-${local.suffix}"
   role             = aws_iam_role.lambda.arn
