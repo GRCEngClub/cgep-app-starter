@@ -80,6 +80,19 @@ I also learned that the first merge to `main` (run `42548157532`) applied nothin
 - **Public repository.** The Actions logs show resource names and the AWS account number. There are no secrets in this stack, but a real PHI system would keep logs private.
 - **Pinned tool versions** (Terraform 1.16.0, Conftest 0.56.0, Cosign 2.2.4) keep runs reproducible, and they need deliberate upgrades.
 
+## Scanner results
+
+Before submitting I ran the scanners that the rubric names. gitleaks found no secrets in the full git history. `terraform fmt -check` passes for both `terraform/` and `bootstrap/`, and `terraform validate` passes on the main stack. semgrep reports no error-level findings. The one it did find, shell injection in the run-metadata step of the workflow, I fixed by passing the GitHub context values through `env:` instead of writing them into the script. What semgrep still reports are warnings about mutable action tags (`@v3`, `@v4`). I did not pin those to commit SHAs because a wrong SHA would break the pipeline and I could not verify them here, so pinning is on my list.
+
+checkov reports 124 passed and 29 failed on the Terraform. The free version does not assign severities, so none of the failures is labeled HIGH or CRITICAL. I fixed the three that were cheap and safe: a public access block on the uploads bucket, an empty default security group, and no public IPs on the unused public subnets. I left the rest failing on purpose, in four groups:
+
+- **Gaps already listed in this write-up:** the Lambda dead-letter queue, reserved concurrency, X-Ray, and API access logging (GAP-06 and GAP-08).
+- **The CloudTrail log bucket:** my policies exempt it from the PHI storage controls by design (versioning and KMS), and CloudTrail's CloudWatch, SNS and CMK integrations are not built.
+- **Sandbox best practices I did not add for a throwaway environment:** S3 replication, lifecycle rules, access logging and event notifications, DynamoDB point-in-time recovery, and VPC flow logs.
+- **The API has no authorizer** (`CKV_AWS_309`). That is how the starter workload ships, it is not one of the eight listed gaps, and adding one would break the smoke test, so I treated it as out of scope. A real PHI system would need it.
+
+I did not hide any of these with skip comments, because a scanner finding I have explained is more useful to a reviewer than one I have silenced.
+
 ## What I didn't get to
 
 - **GAP-06** (SI.L2-3.14.6): no reserved concurrency, dead-letter queue, or X-Ray tracing on the Lambda. I would close it with `reserved_concurrent_executions`, a `dead_letter_config`, and `tracing_config`, plus a Rego policy for each, following the same pattern as the other six.

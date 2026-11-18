@@ -92,16 +92,23 @@ jobs:
         env:
           GATE: ${{ steps.gate.outcome }}
           APPLY: ${{ steps.apply.outcome }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          EVENT_NAME: ${{ github.event_name }}
+          GIT_REF: ${{ github.ref }}
+          COMMIT_SHA: ${{ github.sha }}
+          ACTOR: ${{ github.actor }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
         run: |
           cat > "$EVIDENCE_DIR/metadata.json" <<JSON
           {
-            "run_id": "${{ github.run_id }}",
-            "run_attempt": "${{ github.run_attempt }}",
-            "event": "${{ github.event_name }}",
-            "ref": "${{ github.ref }}",
-            "commit": "${{ github.sha }}",
-            "actor": "${{ github.actor }}",
-            "workflow": "${{ github.workflow_ref }}",
+            "run_id": "${RUN_ID}",
+            "run_attempt": "${RUN_ATTEMPT}",
+            "event": "${EVENT_NAME}",
+            "ref": "${GIT_REF}",
+            "commit": "${COMMIT_SHA}",
+            "actor": "${ACTOR}",
+            "workflow": "${WORKFLOW_REF}",
             "gate_outcome": "${GATE}",
             "apply_outcome": "${APPLY}"
           }

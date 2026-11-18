@@ -52,3 +52,12 @@ resource "aws_s3_bucket_policy" "uploads_tls_only" {
   bucket = aws_s3_bucket.uploads.id
   policy = data.aws_iam_policy_document.uploads_tls_only.json
 }
+
+# Public access to the PHI bucket is blocked in code, not only by the AWS default.
+resource "aws_s3_bucket_public_access_block" "uploads" {
+  bucket                  = aws_s3_bucket.uploads.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}

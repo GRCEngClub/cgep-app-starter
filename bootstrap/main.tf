@@ -62,11 +62,11 @@ variable "suffix" {
 data "aws_caller_identity" "current" {}
 
 locals {
-  account_id      = data.aws_caller_identity.current.account_id
-  state_bucket    = "${var.name_prefix}-tfstate-${var.suffix}"
-  state_key       = "capstone/terraform.tfstate"
-  vault_bucket    = "${var.name_prefix}-evidence-${var.suffix}"
-  evidence_alias  = "alias/${var.name_prefix}-evidence-${var.suffix}"
-  oidc_host       = "token.actions.githubusercontent.com"
-  role_name_arn   = "arn:aws:iam::${local.account_id}:role/${var.name_prefix}-*"
+  account_id     = data.aws_caller_identity.current.account_id
+  state_bucket   = "${var.name_prefix}-tfstate-${var.suffix}"
+  state_key      = "capstone/terraform.tfstate"
+  vault_bucket   = "${var.name_prefix}-evidence-${var.suffix}"
+  evidence_alias = "alias/${var.name_prefix}-evidence-${var.suffix}"
+  oidc_host      = "token.actions.githubusercontent.com"
+  role_name_arn  = "arn:aws:iam::${local.account_id}:role/${var.name_prefix}-*"
 }

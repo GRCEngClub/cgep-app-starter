@@ -65,3 +65,9 @@ resource "aws_iam_role_policy_attachment" "lambda_vpc" {
   role       = aws_iam_role.lambda.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
 }
+
+# The VPC's default security group allows nothing. Nothing in this stack uses it;
+# the Lambda has its own security group above.
+resource "aws_default_security_group" "default" {
+  vpc_id = aws_vpc.main.id
+}

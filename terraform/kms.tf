@@ -13,7 +13,7 @@ resource "aws_kms_key" "phi" {
   description             = "Acme Health CMK for PHI data stores (S3 uploads, DynamoDB intake)"
   enable_key_rotation     = true
   deletion_window_in_days = 7
-  tags = { Purpose = "phi" }
+  tags                    = { Purpose = "phi" }
 }
 
 resource "aws_kms_alias" "phi" {
