@@ -13,6 +13,13 @@ terraform {
     random  = { source = "hashicorp/random", version = "~> 3.6" }
     archive = { source = "hashicorp/archive", version = "~> 2.4" }
   }
+  backend "s3" {
+    bucket       = "acme-health-intake-tfstate-ysd"
+    key          = "capstone/terraform.tfstate"
+    region       = "us-east-1"
+    encrypt      = true
+    use_lockfile = true # S3-native locking; no DynamoDB table
+  }
 }
 
 provider "aws" {
@@ -96,9 +103,12 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+# Private routing and VPC endpoints for the in-VPC Lambda (GAP-05) are in
+# hardening.tf.
+
 ######################################################################
 # DynamoDB — submissions table.
-# GAP-02: encryption uses AWS-owned default, not a CMK you control.
+# GAP-02 : encryption uses AWS-owned default, not a CMK you control.
 ######################################################################
 
 resource "aws_dynamodb_table" "intake" {
@@ -111,30 +121,23 @@ resource "aws_dynamodb_table" "intake" {
     type = "S"
   }
 
-  # No server_side_encryption block. Defaults to AWS-owned key.
-  # GAP-02: capstone learner expected to add this with a customer-owned key.
+  # GAP-02 CLOSED: encrypt the table with the customer-managed CMK from
+  # kms.tf instead of the AWS-owned default key, putting PHI keys under
+  # customer custody.
+  server_side_encryption {
+    enabled     = true
+    kms_key_arn = aws_kms_key.data.arn
+  }
 }
 
 ######################################################################
-# S3 — uploads bucket.
-# GAP-01: relies on AWS-managed SSE-S3 (default since 2023) instead of
-#         SSE-KMS with a customer CMK. PHI keys are not under customer
-#         custody.
-# GAP-03: no bucket policy denying non-TLS requests
-#         (aws:SecureTransport).
-# GAP-04: no versioning. PHI overwrites are unrecoverable.
-#
-# Note: AWS now defaults new buckets to SSE-S3 + full public access block.
-# The "gaps" here are real residual gaps once those defaults are in place.
+# S3 — uploads bucket (PHI).
+# GAP-01, GAP-03, GAP-04 are closed by module "uploads_bucket" in hardening.tf.
 ######################################################################
 
 resource "aws_s3_bucket" "uploads" {
   bucket = "${local.name_prefix}-uploads-${local.suffix}"
 }
-
-# (Intentionally omitted: SSE-KMS encryption with a customer CMK,
-#  bucket policy enforcing aws:SecureTransport, versioning, lifecycle.
-#  These are the gaps the learner closes.)
 
 ######################################################################
 # Lambda — the intake handler.
@@ -142,6 +145,36 @@ resource "aws_s3_bucket" "uploads" {
 # GAP-06: no reserved concurrency, no DLQ, no X-Ray.
 # GAP-07: IAM role has dynamodb:* and s3:* on the resources (over-broad).
 ######################################################################
+
+# GAP-07 CLOSED: least privilege. The handler makes exactly
+# two AWS calls (lambda/handler.py): DynamoDB put_item on the intake table
+# and S3 put_object under uploads/. The role gets those two actions on
+# those two resources, nothing else: no reads, deletes, scans, or
+# bucket-level actions. KMS use for the encrypted table and bucket is
+# granted in the data key policy (kms.tf), which names this role.
+
+resource "aws_iam_role_policy" "lambda_inline" {
+  name = "intake-data-access"
+  role = aws_iam_role.lambda.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "WriteSubmissions"
+        Effect   = "Allow"
+        Action   = "dynamodb:PutItem"
+        Resource = aws_dynamodb_table.intake.arn
+      },
+      {
+        Sid      = "UploadAttachments"
+        Effect   = "Allow"
+        Action   = "s3:PutObject"
+        Resource = "${aws_s3_bucket.uploads.arn}/uploads/*"
+      }
+    ]
+  })
+}
 
 data "archive_file" "handler" {
   type        = "zip"
@@ -167,28 +200,6 @@ resource "aws_iam_role_policy_attachment" "lambda_basic" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-# GAP-07: deliberately broad permissions on the workload data stores.
-resource "aws_iam_role_policy" "lambda_inline" {
-  name = "intake-data-access"
-  role = aws_iam_role.lambda.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect   = "Allow"
-        Action   = "dynamodb:*"
-        Resource = aws_dynamodb_table.intake.arn
-      },
-      {
-        Effect   = "Allow"
-        Action   = "s3:*"
-        Resource = ["${aws_s3_bucket.uploads.arn}", "${aws_s3_bucket.uploads.arn}/*"]
-      }
-    ]
-  })
-}
-
 resource "aws_lambda_function" "intake" {
   function_name    = "${local.name_prefix}-handler-${local.suffix}"
   role             = aws_iam_role.lambda.arn
@@ -205,8 +216,32 @@ resource "aws_lambda_function" "intake" {
     }
   }
 
-  # GAP-05: no vpc_config block. Learner expected to add one referencing
-  # aws_subnet.private[*] and a hardened security group.
+  # GAP-05 CLOSED: run the function inside the VPC's private subnets so it
+  # has no public IP and its traffic stays within controlled network paths.
+  # Its security group, ENI permissions, and VPC endpoints are in hardening.tf.
+  vpc_config {
+    subnet_ids         = aws_subnet.private[*].id
+    security_group_ids = [aws_security_group.lambda.id]
+  }
+
+  # Gap-06 CLOSED: the function can now be monitored and cannot run away.
+  # Its DLQ, IAM permissions, and X-Ray endpoint are in hardening.tf.
+  # Cap concurrency so a flood of requests (abuse or bug) can't exhaust the
+  # account's Lambda capacity or overwhelm DynamoDB.
+
+  reserved_concurrent_executions = var.lambda_reserved_concurrency
+
+  # Trace every request through X-Ray, so failures and latency are visible.
+  tracing_config {
+    mode = "Active"
+  }
+
+  # Keep events that fail all retries instead of dropping them. Applies to
+  # asynchronous invocations only; API Gateway calls this function
+  # synchronously, so API errors return to the caller instead.
+  dead_letter_config {
+    target_arn = aws_sqs_queue.intake_dlq.arn
+  }
 }
 
 ######################################################################
@@ -237,8 +272,40 @@ resource "aws_apigatewayv2_stage" "default" {
   api_id      = aws_apigatewayv2_api.intake.id
   name        = "$default"
   auto_deploy = true
-  # GAP-08: no access_log_settings. Learner expected to wire CloudWatch logs.
+
+  # GAP-08 CLOSED : every request is recorded, and traffic is
+  # capped at the edge. The log group is in hardening.tf.
+  # WAF is NOT closed: AWS WAF can't attach to an HTTP API. Documented as a
+  # limitation; the fix is CloudFront + WAF in front, or a REST API.
+
+  # Access logs: one JSON line per request (who, when, what, result).
+  # Fields are API Gateway $context variables from AWS's HTTP API example.
+
+  access_log_settings {
+    destination_arn = aws_cloudwatch_log_group.api_access.arn
+    format = jsonencode({
+      requestId         = "$context.requestId"
+      extendedRequestId = "$context.extendedRequestId"
+      sourceIp          = "$context.identity.sourceIp"
+      requestTime       = "$context.requestTime"
+      httpMethod        = "$context.httpMethod"
+      routeKey          = "$context.routeKey"
+      protocol          = "$context.protocol"
+      status            = "$context.status"
+      responseLength    = "$context.responseLength"
+    })
+  }
+
+
+  # Throttling: excess requests get 429 at the API instead of recahing 
+  # the lambda, sized to match its reserved cocurrency (GAP-06). 
+
+  default_route_settings {
+    throttling_rate_limit  = var.api_throttling_rate_limit
+    throttling_burst_limit = var.api_throttling_burst_limit
+  }
 }
+
 
 resource "aws_lambda_permission" "apigw" {
   statement_id  = "AllowAPIGatewayInvoke"
